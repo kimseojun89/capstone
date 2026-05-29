@@ -1,0 +1,51 @@
+# ── Python ─────────────────────────────────────────────
+**/.venv/
+**/__pycache__/
+*.pyc
+
+# ── C++ 빌드 산출물 (재생성 가능) ───────────────────────
+antidrone/cpp/build/
+antidrone/cpp/build_win/
+
+# ── 다운로드 SDK / 대용량 아카이브 ──────────────────────
+onnxruntime-gpu/
+*.zip
+
+# ── 대용량 모델 가중치 (git 비추적; 별도 보관) ──────────
+*.onnx
+*.pt
+*.bin
+
+# ── Vivado 생성물 (소스: .xpr, .srcs/constrs·bd·hdl 만 추적) ──
+antidrone/antidrone.cache/
+antidrone/antidrone.hw/
+antidrone/antidrone.sim/
+antidrone/antidrone.ip_user_files/
+antidrone/antidrone.gen/
+vivado_project/*.cache/
+vivado_project/*.hw/
+vivado_project/*.sim/
+vivado_project/*.ip_user_files/
+vivado_project/*.runs/
+vivado_project/*.gen/
+vivado_project/*.ipdefs/
+*.jou
+*.log
+
+# ── Vitis 플랫폼 (XSA에서 재생성; recreate_platform.tcl) ─
+antidrone/vitis_workspace/antidrone_platform/
+
+# ── Vitis 생성물 (소스만 추적) ──────────────────────────
+antidrone/vitis_workspace/**/build/
+antidrone/vitis_workspace/**/_ide/
+antidrone/vitis_workspace/**/logs/
+antidrone/logs/
+
+# ── Vitis HLS 프로젝트 산출물 (.cpp 소스는 추적) ────────
+Vitis/*_prj/
+
+# ── 에디터 / IDE / 캐시 ─────────────────────────────────
+**/.theia/
+**/.cache/
+**/.compile_commands/
+.vscode/

@@ -1,0 +1,5 @@
+[YoloDetector] ëª¨ë¸: "C:\\Users\\kimse\\capstone\\antidrone\\models\\drone_yolov8x\\best.onnx"
+[YoloDetector] ?”ë°”?´ìŠ¤: CUDA
+[YoloDetector] ?…ë ¥ ?¬ê¸°: 640x640
+Model: "C:\\Users\\kimse\\capstone\\antidrone\\models\\drone_yolov8x\\best.onnx"
+Inference device: CUDA
