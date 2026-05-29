@@ -4,52 +4,49 @@
 
 ## 1. 폴더 구조
 
+> 2026-05-29 재구성: 문서는 `docs/`, 빌드 스크립트는 `scripts/`, 미사용은 `legacy/`로 분리.
+> 런타임은 `antidrone/`에 유지. 전체 맵은 루트 [README.md](../README.md) 참고.
+
 ```
-C:\Users\kimse\capstone\antidrone\
+C:\Users\kimse\capstone\
 │
-├── run_system.ps1                   ← 통합 실행 스크립트 (진입점)
-├── flash.tcl                        ← XSCT용 FPGA 플래시 스크립트
-├── INTEGRATION.md                   ← 통합 설계 문서
-├── SYSTEM_OVERVIEW.md               ← 이 문서
+├── README.md                        ← 프로젝트 진입점
+├── docs/                            ← 설계·작업 문서 (이 문서 포함)
+│   ├── SYSTEM_OVERVIEW.md           ← 이 문서
+│   ├── INTEGRATION.md               ← 통합 설계 문서
+│   ├── ONNX_CUDA_Migration.md
+│   ├── FPGA_workflow.md
+│   ├── motor_porting_guide.md
+│   ├── motor_control_changes.md     ← 모터 제어 정본
+│   └── OPEN_ISSUES.md               ← 미해결 항목 통합
+├── scripts/                         ← 빌드 도구 (build_win.bat 등)
+├── legacy/                          ← 미사용·레거시 격리
 │
-├── unified_gui.py                   ← 통합 GUI (카메라 + PPI 한 창)
-├── ppi_viewer.py                    ← 레이더 PPI 단독 뷰어 (백업용)
-├── requirements-ppi.txt             ← numpy, pygame, pyserial
-├── .venv/                           ← Python 가상환경
+├── antidrone/                       ← ── 런타임 ──
+│   ├── run_system.ps1               ← 통합 실행 스크립트 (진입점)
+│   ├── flash.tcl                    ← XSCT용 FPGA 플래시 스크립트
+│   ├── unified_gui.py               ← 통합 GUI (카메라 + PPI 한 창)
+│   ├── requirements-ppi.txt         ← numpy, pygame, pyserial
+│   ├── .venv/                       ← Python 가상환경
+│   │
+│   ├── cpp/
+│   │   ├── CMakeLists.txt
+│   │   ├── apps/ptcamera_tracker.cpp   ← 메인 PC 앱 소스
+│   │   ├── src/  control.cpp(PID) · detector.cpp(YOLO ONNX) · pipeline.cpp
+│   │   │         tracking.cpp(ByteTrack) · serial_port.cpp(T:/P:) · overlay · settings
+│   │   ├── include/ptcamera/  settings.hpp(cameraIndex=1, 1920x1080) · serial_port.hpp
+│   │   └── build_win/ptcamera_tracker.exe  ← 빌드 결과물
+│   │
+│   ├── models/drone_yolov8x/best.onnx  ← YOLOv8x 드론 감지 모델 (CUDA)
+│   │
+│   └── vitis_workspace/antidrone_app/
+│       ├── src/ps_main.cpp          ← FPGA 베어메탈 소스
+│       ├── build/antidrone_app.elf  ← 빌드 결과물
+│       └── _ide/ bitstream/antidrone_wrapper.bit · psinit/ps7_init.tcl
 │
-├── cpp/
-│   ├── CMakeLists.txt
-│   ├── apps/
-│   │   └── ptcamera_tracker.cpp     ← 메인 PC 앱 소스
-│   ├── src/
-│   │   ├── control.cpp              ← PID + AxisController
-│   │   ├── detector.cpp             ← YOLOv8x ONNX 추론
-│   │   ├── pipeline.cpp             ← 카메라 → YOLO → ByteTrack 파이프라인
-│   │   ├── tracking.cpp             ← ByteTracker + 칼만 필터
-│   │   ├── serial_port.cpp          ← UART 통신 (T:/P: 명령)
-│   │   ├── overlay.cpp              ← 화면 오버레이 그리기
-│   │   └── settings.cpp             ← 설정 로드
-│   ├── include/ptcamera/
-│   │   ├── settings.hpp             ← cameraIndex=1, 1920x1080
-│   │   └── serial_port.hpp          ← sendTiltCommand / sendPanCommand
-│   └── build_win/
-│       └── ptcamera_tracker.exe     ← 빌드 결과물 (실행파일)
-│
-├── models/
-│   └── drone_yolov8x/
-│       └── best.onnx                ← YOLOv8x 드론 감지 모델 (CUDA)
-│
-└── vitis_workspace/
-    └── antidrone_app/
-        ├── src/
-        │   └── ps_main.cpp          ← FPGA 베어메탈 소스
-        ├── build/
-        │   └── antidrone_app.elf    ← 빌드 결과물
-        └── _ide/
-            ├── bitstream/
-            │   └── antidrone_wrapper.bit  ← PL 비트스트림
-            └── psinit/
-                └── ps7_init.tcl     ← PS 초기화 스크립트
+├── Vitis/                           ← HLS IP 소스 (cordic/kalman/motor/mti)
+├── vivado_project/                  ← Vivado 블록디자인·비트스트림
+└── onnxruntime-gpu/                 ← ONNX Runtime GPU SDK
 ```
 
 ---
@@ -160,16 +157,20 @@ cd C:\Users\kimse\capstone\antidrone
 
 ---
 
-## 5. FPGA 모터 제어 3-모드 상태머신
+## 5. FPGA 모터 제어 상태머신
 
-| 모드 | 조건 | Pan 제어 | Tilt 제어 |
+> 정본: [motor_control_changes.md](motor_control_changes.md). **Pan은 항상 안테나(레이더) 방위각 전용**,
+> Tilt만 상황(카메라 퓨전 여부)에 따라 분기. 레이더 Pan은 증분 PID가 아닌 **절대 위치 SET**(무한 회전 방지).
+
+| 모드 | 조건 | Pan 소스 | Tilt 소스 |
 |---|---|---|---|
-| **레이더 획득** | `rvc > 0`, YOLO pan 없음 | 레이더 방위각 PID | PC `T:±N` |
-| **AI 트래킹** | `g_host_pan_steps != 0` | PC `P:±N` (YOLO) | PC `T:±N` (YOLO) |
-| **표적 없음** | 둘 다 없음 | 정지 | 정지 |
+| **AI 트래킹** | `g_host_pan_steps != 0` | PC `P:±N` (직접 스텝) | PC `T:±N` (직접 스텝) |
+| **퓨전** | `rvc > 0` & `fi >= 0` | 안테나 방위각 (절대 위치) | 카메라 BBox `cy` PID |
+| **레이더 단독** | `rvc > 0` & `fi < 0` | 안테나 방위각 (절대 위치) | PC `T:±N` 명령 |
+| **표적 없음** | `rvc == 0` | — (마지막 위치 유지) | — |
 
-> YOLO가 드론을 추적 중일 때 `panSteps != 0` 이면 PC가 Pan까지 제어 (AI 트래킹 모드).  
-> 레이더만 있을 때는 레이더가 Pan을 담당하고 YOLO가 Tilt만 보정.
+> `rang`(레이더 각도, 0.1도 단위)을 `g_motor_abs_pan = -(rang/10 × 4096/360)`로 절대 변환(±90도 클램프).
+> 목표 각도 도달 후 자동 정지. AI 트래킹 모드에서만 PC가 Pan까지 직접 제어.
 
 ---
 
@@ -233,11 +234,12 @@ cmake --build build_win --target ptcamera_tracker
 | 시리얼 포트 | COM4 | `run_system.ps1` |
 | YOLO 모델 | `models/drone_yolov8x/best.onnx` | `settings.cpp` |
 | 추론 장치 | CUDA (RTX 3050) | `settings.hpp` |
-| 모터 속도 딜레이 | 300 (탈조 시 500으로 올릴 것) | `ps_main.cpp` |
+| 모터 속도 딜레이 | 200 (154°/s; 탈조 시 300으로) | `ps_main.cpp:118` |
+| 모터 PID KP / MAX_STEP | KP=2.0 / 58 | `ps_main.cpp:100,107` |
 | Pan deadband | 35 px | `ps_main.cpp`, `settings.hpp` |
 | Tilt deadband | 35 px | `ps_main.cpp`, `settings.hpp` |
-| 레이더 최대 거리 | 8000 mm | `ppi_viewer.py`, `unified_gui.py` |
-| PPI FOV | 120 도 | `ppi_viewer.py`, `unified_gui.py` |
+| 레이더 최대 거리 | 8000 mm | `unified_gui.py` |
+| PPI FOV | 120 도 | `unified_gui.py` |
 
 ---
 
@@ -247,7 +249,7 @@ cmake --build build_win --target ptcamera_tracker
 |---|---|---|
 | 카메라가 노트북 웹캠으로 나옴 | `cameraIndex=0` | `settings.hpp`에서 `cameraIndex=1` 확인 |
 | PPI 창이 안 뜸 | `.venv` Python 미사용 | `run_system.ps1`의 `$PYTHON` 경로 확인 |
-| 모터가 떨리고 안 돌아감 (탈조) | `MOTOR_SPEED_DELAY` 너무 작음 | `ps_main.cpp`에서 300 → 500으로 변경 후 재빌드 |
+| 모터가 떨리고 안 돌아감 (탈조) | `MOTOR_SPEED_DELAY` 너무 작음 | `ps_main.cpp`에서 200 → 300, MAX_STEP 58 → 38로 변경 후 재빌드 |
 | `LINK: OFFLINE` 표시 | ptcamera_tracker 미실행 or COM4 미연결 | 시리얼 케이블 및 트래커 실행 확인 |
 | CUDA 없이 추론 | GPU 드라이버 or ONNX Runtime 문제 | `--device CPU`로 fallback 가능 |
 | COM4 포트 충돌 | Tera Term 등 다른 터미널이 COM4 점유 | 다른 시리얼 터미널 종료 후 재실행 |

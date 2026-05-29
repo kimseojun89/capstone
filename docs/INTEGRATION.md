@@ -165,7 +165,11 @@ endif()
 
 ---
 
-### 7. `ppi_viewer.py`
+### 7. `ppi_viewer.py` → **현재 `unified_gui.py`로 대체**
+
+> ⚠️ 2026-05-29 재구성: 런타임 뷰어는 `antidrone/unified_gui.py`(카메라+PPI 통합 창) 1개로 일원화.
+> `ppi_viewer.py`(PPI 단독)와 `run_ppi_viewer.bat`은 [legacy/](../legacy/)로 격리됨.
+> 아래 UDP 릴레이 동작은 `unified_gui.py`에 동일하게 구현되어 있다.
 
 - `BAUD_RATE`: 115200 → 256000
 - **UDP 소켓** (primary): `bind(127.0.0.1:9999)`, non-blocking

@@ -16,6 +16,9 @@ onnxruntime-gpu/
 *.pt
 *.bin
 
+# ── 레거시 OpenVINO IR (272MB 블롭; 디스크 보관, git 제외) ─
+legacy/best_openvino_model/
+
 # ── Vivado 생성물 (소스: .xpr, .srcs/constrs·bd·hdl 만 추적) ──
 antidrone/antidrone.cache/
 antidrone/antidrone.hw/
