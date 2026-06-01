@@ -198,12 +198,16 @@ static uint8_t ring_at(uint32_t i) { return g_ring[i % RING_SZ]; }
 static uint8_t  g_host_ring[HOST_RING_SZ];
 static uint32_t g_host_head = 0;
 static uint32_t g_host_tail = 0;
-static int      g_host_tilt_steps = 0;  // 수동 모드 tilt 직접 스텝 (M:1 전용)
-static int      g_host_pan_steps  = 0;  // 수동 모드 pan 직접 스텝
-static int      g_host_bbox_ex    = 0;  // AI 모드: bbox 중심 x 오차 (320px 기준 스케일)
-static int      g_host_bbox_ey    = 0;  // AI 모드: bbox 중심 y 오차 (240px 기준 스케일)
-static bool     g_host_bbox_valid = false;  // 이번 프레임 bbox 수신 여부
-static bool     g_manual_mode     = false;  // 수동 모드: minStep 제한 해제 (캘리브레이션용)
+static int      g_motor_abs_pan       = 0;  // IP 누적 목표 (A: 파서에서 참조 — 선언 순서 주의)
+static int      g_motor_abs_tilt      = 0;
+static int      g_manual_pending_pan  = 0;  // 수동 모드 미실행 pan 잔량 (M:1 전용, 유실 없음)
+static int      g_manual_pending_tilt = 0;  // 수동 모드 미실행 tilt 잔량
+static int      g_abs_pending_pan     = 0;  // A: 절대좌표 명령 미실행 pan 잔량
+static int      g_abs_pending_tilt    = 0;  // A: 절대좌표 명령 미실행 tilt 잔량
+static int      g_host_bbox_ex        = 0;  // AI 모드: bbox 중심 x 오차 (320px 기준 스케일)
+static int      g_host_bbox_ey        = 0;  // AI 모드: bbox 중심 y 오차 (240px 기준 스케일)
+static bool     g_host_bbox_valid     = false;  // 이번 프레임 bbox 수신 여부
+static bool     g_manual_mode         = false;  // 수동 모드: minStep 제한 없음 (캘리브레이션용)
 
 static void host_ring_push(uint8_t b)
 {
@@ -241,7 +245,7 @@ static void host_parse_commands(void)
         if (len < 3 || len > 24) { g_host_tail = nl_pos + 1; continue; }
 
         uint8_t cmd = host_ring_at(g_host_tail);
-        if ((cmd == 'T' || cmd == 'P' || cmd == 'M' || cmd == 'B') &&
+        if ((cmd == 'T' || cmd == 'P' || cmd == 'M' || cmd == 'B' || cmd == 'A') &&
              host_ring_at(g_host_tail + 1) == ':') {
             if (cmd == 'B') {
                 // "B:ex,ey" — 부호 있는 정수 두 개, 쉼표 구분
@@ -272,6 +276,33 @@ static void host_parse_commands(void)
                     g_host_bbox_ey    = sign * ey;
                     g_host_bbox_valid = true;
                 }
+            } else if (cmd == 'A') {
+                // "A:pan_steps,tilt_steps" — 절대 스텝 좌표 이동 (pose table 기반)
+                int pan = 0, tilt_val = 0, sign = 1;
+                uint32_t p = g_host_tail + 2;
+                bool ok = false;
+                if ((int32_t)(nl_pos-p) > 0 && host_ring_at(p) == '-') { sign = -1; p++; }
+                else if ((int32_t)(nl_pos-p) > 0 && host_ring_at(p) == '+') { p++; }
+                while ((int32_t)(nl_pos-p) > 0) {
+                    uint8_t c = host_ring_at(p++);
+                    if (c >= '0' && c <= '9') { pan = pan*10 + (c-'0'); ok = true; }
+                    else if (c == ',') { pan = sign*pan; sign = 1; break; }
+                    else { ok = false; break; }
+                }
+                if (ok) {
+                    ok = false;
+                    if ((int32_t)(nl_pos-p) > 0 && host_ring_at(p) == '-') { sign = -1; p++; }
+                    else if ((int32_t)(nl_pos-p) > 0 && host_ring_at(p) == '+') { p++; }
+                    while ((int32_t)(nl_pos-p) > 0) {
+                        uint8_t c = host_ring_at(p++);
+                        if (c >= '0' && c <= '9') { tilt_val = tilt_val*10 + (c-'0'); ok = true; }
+                        else { ok = false; break; }
+                    }
+                }
+                if (ok) {
+                    g_abs_pending_pan  = pan           - g_motor_abs_pan;
+                    g_abs_pending_tilt = sign*tilt_val - g_motor_abs_tilt;
+                }
             } else {
                 int val = 0, sign = 1;
                 uint32_t p = g_host_tail + 2;
@@ -284,9 +315,16 @@ static void host_parse_commands(void)
                     else { ok = false; break; }
                 }
                 if (ok) {
-                    if (cmd == 'T')      g_host_tilt_steps = sign * val;
-                    else if (cmd == 'P') g_host_pan_steps  = sign * val;
-                    else if (cmd == 'M') g_manual_mode     = (val != 0);
+                    if (cmd == 'T') {
+                        if (g_manual_mode) g_manual_pending_tilt += sign * val;
+                    } else if (cmd == 'P') {
+                        if (g_manual_mode) g_manual_pending_pan  += sign * val;
+                    } else if (cmd == 'M') {
+                        // M:0 / M:1 모두 pending 클리어 — 크래시 후 잔량 제거
+                        g_manual_pending_pan  = 0;
+                        g_manual_pending_tilt = 0;
+                        g_manual_mode = (val != 0);
+                    }
                 }
             }
         }
@@ -504,8 +542,6 @@ static float g_pan_prev_err  = 0.0f;
 static float g_tilt_prev_err = 0.0f;
 static float g_pan_cmd       = 0.0f;
 static float g_tilt_cmd      = 0.0f;
-static int   g_motor_abs_pan  = 0;   // IP의 static current_pan 기준 누적 목표
-static int   g_motor_abs_tilt = 0;
 static bool  g_had_target     = false; // 직전 프레임 표적 유무 (acquireRampScale 판별)
 static int   g_host_cmd_cooldown = 0; // 명령 실행 보호 (IP 이동 완료 대기)
 static int   g_ai_lock_frames    = 0; // AI 추적 모드 유지 — 레이더 오버라이드 차단
@@ -620,37 +656,23 @@ static void motor_update_hybrid(int pan_err_x, bool has_target, int direct_tilt_
 }
 
 // ============================================================
-//  AI 완전 제어 모드 — Pan+Tilt 모두 호스트(PC YOLO) 직접 스텝
-//  레이더가 없거나 YOLO가 드론 추적 중일 때 사용
+//  펜딩 큐 실행기 — 수동(M:1+P:/T:) 및 절대좌표(A:) 공용
+//  MAX_STEP씩 쪼개어 실행 → 명령 유실 없이 모든 잔량 소진 보장
 // ============================================================
-static void motor_update_full_host(int direct_pan_steps, int direct_tilt_steps)
+static bool motor_try_move_pending(int* ppan, int* ptilt)
 {
-    g_had_target = true;
+    if (*ppan == 0 && *ptilt == 0) return false;
+    if (!(MOTOR_RD(0x00) & AP_IDLE)) return false;
 
-    int dpan = direct_pan_steps;
-    int dtilt = direct_tilt_steps;
+    int dpan  = *ppan;
+    int dtilt = *ptilt;
+    if (dpan  >  MOTOR_PAN_MAX_STEP)  dpan  =  MOTOR_PAN_MAX_STEP;
+    if (dpan  < -MOTOR_PAN_MAX_STEP)  dpan  = -MOTOR_PAN_MAX_STEP;
+    if (dtilt >  MOTOR_TILT_MAX_STEP) dtilt =  MOTOR_TILT_MAX_STEP;
+    if (dtilt < -MOTOR_TILT_MAX_STEP) dtilt = -MOTOR_TILT_MAX_STEP;
 
-    // maxStep 클램프 (자동/수동 공통)
-    if (dpan >  MOTOR_PAN_MAX_STEP)  dpan =  MOTOR_PAN_MAX_STEP;
-    if (dpan < -MOTOR_PAN_MAX_STEP)  dpan = -MOTOR_PAN_MAX_STEP;
-    if (dtilt >  MOTOR_TILT_MAX_STEP)  dtilt =  MOTOR_TILT_MAX_STEP;
-    if (dtilt < -MOTOR_TILT_MAX_STEP)  dtilt = -MOTOR_TILT_MAX_STEP;
-
-    if (!g_manual_mode) {
-        // 자동 모드: minStep 미만 명령 무시 (미세 진동 방지)
-        if (abs(dpan) < MOTOR_PAN_MIN_STEP) dpan = 0;
-        if (abs(dtilt) < MOTOR_TILT_MIN_STEP) dtilt = 0;
-    }
-    // 수동 모드: minStep 제한 없음 → 1스텝(0.011°)부터 정밀 이동 가능
-
-    // 모드 전환 시 PID 글리치 방지
-    g_pan_prev_err  = 0.0f; g_pan_cmd  = 0.0f;
-    g_tilt_prev_err = 0.0f; g_tilt_cmd = 0.0f;
-
-    if (dpan == 0 && dtilt == 0) return;
-
-    // IP 실행 중이면 누적하지 않음 — 완료 시 최신 1프레임치만 적용 (연쇄 지연 방지)
-    if (!(MOTOR_RD(0x00) & AP_IDLE)) return;
+    *ppan  -= dpan;
+    *ptilt -= dtilt;
 
     g_motor_abs_pan  += dpan;
     g_motor_abs_tilt += dtilt;
@@ -659,6 +681,7 @@ static void motor_update_full_host(int direct_pan_steps, int direct_tilt_steps)
     MOTOR_WR(0x18, (u32)g_motor_abs_tilt);
     MOTOR_WR(0x20, MOTOR_SPEED_DELAY);
     MOTOR_WR(0x00, AP_START);
+    return true;
 }
 
 // ============================================================
@@ -758,38 +781,42 @@ int main(void)
         // 2. 칼만 필터 예측/보정
         kalman_ip_run(rtgt, ks);
 
-        // 3. 모터 제어 (AI추적 > 레이더 단독 > 정지)
+        // 3. 모터 제어 — 우선순위: 수동(M:1) > 절대좌표(A:) > AI bbox > 레이더 > 정지
         host_accumulate();
         host_parse_commands();
 
-        if (g_host_bbox_valid && g_host_cmd_cooldown == 0) {
+        if (g_manual_mode) {
+            // 수동 캘리브레이션: P:/T: 펜딩 소진 (명령 유실 없음, 레이더 차단)
+            if (motor_try_move_pending(&g_manual_pending_pan, &g_manual_pending_tilt)) {
+                g_pan_prev_err  = 0.0f; g_pan_cmd  = 0.0f;
+                g_tilt_prev_err = 0.0f; g_tilt_cmd = 0.0f;
+            }
+        } else if (g_abs_pending_pan != 0 || g_abs_pending_tilt != 0) {
+            // 절대좌표 이동: A: 명령 펜딩 소진 (pose table 기반 좌표 제어)
+            if (motor_try_move_pending(&g_abs_pending_pan, &g_abs_pending_tilt)) {
+                g_host_cmd_cooldown = HOST_CMD_COOLDOWN_FRAMES;
+                g_pan_prev_err  = 0.0f; g_pan_cmd  = 0.0f;
+                g_tilt_prev_err = 0.0f; g_tilt_cmd = 0.0f;
+            }
+        } else if (g_host_bbox_valid && g_host_cmd_cooldown == 0) {
             // AI 추적 모드: PC bbox 오차 → FPGA PID → Pan+Tilt
             motor_update_ai_bbox(g_host_bbox_ex, g_host_bbox_ey);
             g_host_cmd_cooldown = HOST_CMD_COOLDOWN_FRAMES;
             g_ai_lock_frames    = AI_LOCK_FRAMES;
-        } else if (g_manual_mode &&
-                   (g_host_pan_steps != 0 || g_host_tilt_steps != 0) &&
-                   g_host_cmd_cooldown == 0) {
-            // 수동 모드: PC 방향키 직접 스텝 (캘리브레이션/점검용)
-            motor_update_full_host(g_host_pan_steps, g_host_tilt_steps);
-            g_host_cmd_cooldown = HOST_CMD_COOLDOWN_FRAMES;
         } else if (g_host_cmd_cooldown > 0) {
             // 모터 이동 완료 대기 — 레이더 개입 없음
             g_host_cmd_cooldown--;
             if (g_ai_lock_frames > 0) g_ai_lock_frames--;
         } else if (g_ai_lock_frames > 0) {
-            // AI 잠금 중 — 레이더 오버라이드 차단 (다음 bbox 도착 전 공백 보호)
+            // AI 잠금 중 — 레이더 오버라이드 차단
             g_ai_lock_frames--;
         } else if (rvc > 0) {
             // 레이더 단독 모드: AI 잠금 완전 해제 후에만 진입
             motor_update_hybrid(angle_to_px(rang) - CAM_W_PX / 2, true, 0);
         } else {
-            // 표적 없음
             g_had_target = false;
         }
         g_host_bbox_valid = false;
-        g_host_pan_steps  = 0;
-        g_host_tilt_steps = 0;
 
         // 💡 [아키텍트 패치] Python UI 실시간 트래킹을 위해 레이더 좌표는 '매 프레임' 즉각 전송!
         if(rvc>0 && (fid % RADAR_LOG_PERIOD_FRAMES) == 0){

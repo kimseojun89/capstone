@@ -25,6 +25,7 @@ FPGA 시리얼 프로토콜 (256000 baud, 8N1, DTR/RTS off):
 """
 
 import argparse
+import signal
 import time
 from pathlib import Path
 
@@ -404,8 +405,20 @@ def main() -> None:
 
     # FPGA 수동 모드 진입 (minStep 제한 해제 → 1스텝/0.011° 정밀 제어)
     if serial_ok:
+        # 이전 run의 잔류 수동 모드 해제 후 재진입 (pending 클리어 목적)
+        motor.send_manual_mode(False)
+        time.sleep(0.05)
         motor.send_manual_mode(True)
         print("[Motor] FPGA manual mode enabled (minStep limit removed)")
+
+    # 터미널 강제 종료 시에도 M:0 전송 — SIGINT(Ctrl+C), SIGTERM(X 버튼)
+    def _emergency_stop(signum, frame):  # noqa: ARG001
+        if serial_ok:
+            motor.send_manual_mode(False)
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGINT,  _emergency_stop)
+    signal.signal(signal.SIGTERM, _emergency_stop)
 
     print(
         "[Motor] Current position defined as pan=0, tilt=0.\n"

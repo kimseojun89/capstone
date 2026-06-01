@@ -139,5 +139,6 @@ cd C:\Users\kimse\capstone\antidrone
 ## 작업 규약
 
 - 문서(`docs/`)는 한국어. **코드와 문서가 다르면 코드를 신뢰**하고 문서를 갱신할 것.
+- 한글 깨짐 방지: 파일은 UTF-8 기준. Windows 터미널/AI 명령 출력이 깨지면 `chcp 65001`, `$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)` 확인.
 - 빌드 산출물(`build_win/`, `*.elf`, `*.bit`)·대용량 바이너리(`*.onnx`, `*.pt`)는 git 미추적(`.gitignore`).
 - 미사용/레거시는 `legacy/`로 격리됨 (`mti_subsystem/`, `ppi_viewer.py`, `serial_stepper_test.cpp` 등).

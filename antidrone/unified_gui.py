@@ -18,6 +18,7 @@ Usage:
 import io
 import json
 import math
+import os
 import re
 import socket
 import sys
@@ -29,14 +30,19 @@ import pygame
 # ============================================================
 #  Layout
 # ============================================================
-LEFT_W = 800
-SIDE_W = 400
+BASE_LEFT_W = 800
+BASE_SIDE_W = 400
+BASE_CAM_W, BASE_CAM_H = 800, 450  # 16:9 camera panel
+BASE_PPI_W, BASE_PPI_H = 800, 450  # radar PPI panel
+BASE_WIN_W = BASE_LEFT_W + BASE_SIDE_W
+BASE_WIN_H = BASE_CAM_H + BASE_PPI_H
 
-CAM_W, CAM_H = 800, 450  # 16:9 camera panel
-PPI_W, PPI_H = 800, 450  # radar PPI panel
-
-WIN_W = LEFT_W + SIDE_W  # 1200
-WIN_H = CAM_H + PPI_H  # 900
+LEFT_W = BASE_LEFT_W
+SIDE_W = BASE_SIDE_W
+CAM_W, CAM_H = BASE_CAM_W, BASE_CAM_H
+PPI_W, PPI_H = BASE_PPI_W, BASE_PPI_H
+WIN_W, WIN_H = BASE_WIN_W, BASE_WIN_H
+LAYOUT_SCALE = 1.0
 
 # Radar geometry
 MAX_RANGE = 8000
@@ -50,7 +56,34 @@ STAR_RADIUS = 30
 
 UDP_CAM_PORT = 9998
 UDP_PPI_PORT = 9999
-UDP_TELEM_PORT = 10000  # ptcamera_tracker → GUI 상태 표시용
+UDP_TELEM_PORT = 10000
+
+
+def configure_layout(display_w, display_h):
+    """Fit the fixed display layout inside the current laptop screen."""
+    global LEFT_W, SIDE_W, CAM_W, CAM_H, PPI_W, PPI_H, WIN_W, WIN_H
+    global CX, CY, MAX_PX, LAYOUT_SCALE
+
+    # Leave room for the window title bar and taskbar on small laptop screens.
+    usable_w = max(900, display_w - 40)
+    usable_h = max(600, display_h - 80)
+    LAYOUT_SCALE = min(1.0, usable_w / BASE_WIN_W, usable_h / BASE_WIN_H)
+
+    CAM_W = max(560, int(BASE_CAM_W * LAYOUT_SCALE))
+    CAM_H = max(315, int(BASE_CAM_H * LAYOUT_SCALE))
+    PPI_W = CAM_W
+    PPI_H = CAM_H
+    LEFT_W = CAM_W
+    SIDE_W = max(300, int(BASE_SIDE_W * LAYOUT_SCALE))
+    WIN_W = LEFT_W + SIDE_W
+    WIN_H = CAM_H + PPI_H
+
+    CX = PPI_W // 2
+    CY = PPI_H - max(28, int(40 * LAYOUT_SCALE))
+    MAX_PX = min(
+        PPI_W // 2 - max(35, int(50 * LAYOUT_SCALE)),
+        PPI_H - max(60, int(80 * LAYOUT_SCALE)),
+    )
 
 
 # ============================================================
@@ -493,14 +526,22 @@ def render_side_panel(
 #  Main
 # ============================================================
 def main():
+    os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
     pygame.init()
+
+    display_info = pygame.display.Info()
+    configure_layout(display_info.current_w, display_info.current_h)
 
     screen = pygame.display.set_mode((WIN_W, WIN_H))
     pygame.display.set_caption("Anti-Drone Unified Display")
 
     clock = pygame.time.Clock()
-    font = pygame.font.SysFont("consolas", 15, bold=True)
-    font_s = pygame.font.SysFont("consolas", 12)
+    font = pygame.font.SysFont(
+        "consolas",
+        max(12, int(15 * LAYOUT_SCALE)),
+        bold=True,
+    )
+    font_s = pygame.font.SysFont("consolas", max(10, int(12 * LAYOUT_SCALE)))
 
     print(
         "[OK] Display-only GUI. "
