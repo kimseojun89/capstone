@@ -52,7 +52,7 @@
 
 ## 부족하거나 확인이 필요한 사항
 
-### 1. CORDIC / Kalman HLS IP — PL 하드웨어 호출로 전환 완료
+### 1. CORDIC / Kalman HLS IP — PL 하드웨어 호출
 
 두 IP 모두 `ps_main.cpp`에서 PL 하드웨어 직접 호출로 전환되었다.
 컴파일 타임 스위치로 SW/HLS 선택 가능하다.
@@ -89,7 +89,7 @@ Kalman HLS IP 내부 `DT = 0.1f` (10Hz 기준)이나, 현재 메인 루프는 `u
 
 ---
 
-### 2. Motor Control 코드 추가 완료
+### 2. Motor Control 코드
 
 `antidrone_app\src\ps_main.cpp`에 다음 내용이 추가되었다.
 
@@ -121,21 +121,7 @@ pan/tilt GPIO가 명시적으로 할당되어 있는지 점검.
 
 ---
 
-### 4. ✅ MTI — 레거시화 (2026-06-01)
-
-MTI(온보드 영상 모션 감지)는 `ps_main.cpp`에서 제거되어 [legacy/mti_subsystem/](../legacy/mti_subsystem/)로 분리.
-영상 탐지는 PC YOLO(`ptcamera_tracker.exe`)가 담당하므로 온보드 MTI/Mock 프레임 불필요.
-Vivado 블록디자인의 IP는 PL에 잔존(미사용). 부활법은 해당 폴더 README.
-
----
-
-### 5. ✅ MTI IP DDR 접근 방식 — 무의미화 (레거시화)
-
-MTI 레거시화로 DDR 접근(DMA vs PS 쓰기) 결정 불필요. 부활 시 재검토 ([legacy/mti_subsystem](../legacy/mti_subsystem/)).
-
----
-
-### 6. IP Repository 경로 등록 (필수 — 매 설치/이전 시 재수행)
+### 4. IP Repository 경로 등록 (필수 — 매 설치/이전 시 재수행)
 
 HLS Export 후 Vivado에서 IP를 인식하려면 IP Repository 경로 등록이 필요하다.
 프로젝트를 다른 PC로 옮기거나 Vivado 재설치 시 **자동으로 유지되지 않는다.**
@@ -163,7 +149,7 @@ Block Design 우클릭 → Report IP Status →
 
 ---
 
-### 7. HLS 수정 → Vivado 반영 재빌드 체크리스트
+### 5. HLS 수정 → Vivado 반영 재빌드 체크리스트
 
 HLS 코드를 수정할 때마다 아래 전체 흐름을 반복해야 한다.
 중간 단계를 생략하면 구 버전 IP로 bitstream이 생성된다.
@@ -182,7 +168,7 @@ HLS 코드를 수정할 때마다 아래 전체 흐름을 반복해야 한다.
 
 ---
 
-### 8. C++ 호스트 앱과 베어메탈의 역할 분담 미명세
+### 6. C++ 호스트 앱과 베어메탈의 역할 분담 확인
 
 `C:\Users\kimse\capstone\antidrone\cpp\` 에는 OpenCV + ByteTracker 기반의 별도 C++ 앱이 있다.
 `serial_port.cpp`가 있는 것으로 보아 이 앱이 UART로 PYNQ와 통신하는 것으로 추정되지만,
@@ -190,16 +176,10 @@ HLS 코드를 수정할 때마다 아래 전체 흐름을 반복해야 한다.
 
 ---
 
-### 9. UART 바우드레이트 불일치 위험
+### 7. UART 바우드레이트 불일치 위험
 
 `ps_main.cpp`에서 UART1을 256000 bps로 설정한다.
 레이더 모듈 및 호스트 앱의 시리얼 설정이 이와 일치하는지 확인이 필요하다.
-
----
-
-### 10. ✅ MTI 폴링 블로킹 — 해소 (레거시화)
-
-MTI 제거로 동기 폴링(`while(...AP_DONE...)`) 자체가 사라짐 → UART 수신 정지/링버퍼 오버플로 위험 제거.
 
 ---
 

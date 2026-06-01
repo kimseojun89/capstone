@@ -9,7 +9,7 @@ PC(Windows)에서 영상 추론·관제, PYNQ-Z2 FPGA에서 신호처리·모터
                   (ps_main.cpp)               (ptcamera_tracker.exe)        (unified_gui.py)
 ```
 
-자세한 구조·프로토콜은 **[docs/SYSTEM_OVERVIEW.md](docs/SYSTEM_OVERVIEW.md)** 참고.
+자세한 구조·프로토콜은 **[SYSTEM_OVERVIEW.md](SYSTEM_OVERVIEW.md)** 참고.
 
 ---
 
@@ -17,16 +17,15 @@ PC(Windows)에서 영상 추론·관제, PYNQ-Z2 FPGA에서 신호처리·모터
 
 ```
 capstone/
-├── README.md              ← 이 문서 (진입점)
+├── CLAUDE.md              ← 세션 기준 요약
 ├── docs/                  ← 모든 설계·작업 문서
+│   ├── README.md                  이 문서 (문서 진입점)
 │   ├── SYSTEM_OVERVIEW.md         전체 구조·실행·프로토콜 (기준 문서)
-│   ├── INTEGRATION.md             PC↔FPGA 통합 설계
+│   ├── INTEGRATION.md             PC↔FPGA 현재 통합 구조
 │   ├── ONNX_CUDA_Migration.md     OpenVINO→ONNX CUDA 전환 기록
 │   ├── FPGA_workflow.md           HLS→Vivado→Vitis 빌드 흐름
-│   ├── motor_porting_guide.md     모터 핀맵·속도 튜닝
-│   ├── motor_control_changes.md   모터 제어 수정 이력(정본) ★
-│   ├── motor_control_deep_dive.md 모터 제어 코드 상세 동작 (HLS IP↔PS 연동)
-│   ├── motor_control_analysis.md  모터 제어 분석·수정 방향 (캘리브레이션 맥락)
+│   ├── motor_control.md           모터 제어 정본
+│   ├── P0_PLAN.md                 P0 통합 계획
 │   ├── PANTILT_CALIBRATION_WORKFLOW.md Pan/Tilt 웹캠 ChArUco 캘리브레이션 워크플로우
 │   └── OPEN_ISSUES.md             미해결 항목 통합 ★
 ├── scripts/               ← 빌드·점검 도구
@@ -89,7 +88,7 @@ GUI만 보드 없이 점검하려면 터미널 2개에서 아래처럼 실행한
 .\scripts\run_build.bat
 ```
 
-HLS IP 또는 블록디자인 수정 시 전체 재빌드 흐름은 [docs/FPGA_workflow.md](docs/FPGA_workflow.md) §7 체크리스트 참고.
+HLS IP 또는 블록디자인 수정 시 전체 재빌드 흐름은 [FPGA_workflow.md](FPGA_workflow.md) §7 체크리스트 참고.
 
 ---
 
@@ -99,4 +98,4 @@ HLS IP 또는 블록디자인 수정 시 전체 재빌드 흐름은 [docs/FPGA_w
 - 모델 가중치(`best.onnx` 261MB 등)는 git에 없음 → 별도 보관/재변환 필요.
 
 ## 미해결 항목
-→ **[docs/OPEN_ISSUES.md](docs/OPEN_ISSUES.md)**
+→ **[OPEN_ISSUES.md](OPEN_ISSUES.md)**

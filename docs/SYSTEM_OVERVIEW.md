@@ -4,20 +4,20 @@
 
 ## 1. 폴더 구조
 
-> 2026-05-29 재구성: 문서는 `docs/`, 빌드 스크립트는 `scripts/`, 미사용은 `legacy/`로 분리.
-> 런타임은 `antidrone/`에 유지. 전체 맵은 루트 [README.md](../README.md) 참고.
+> 문서는 `docs/`, 빌드 스크립트는 `scripts/`, 미사용 코드는 `legacy/`로 분리한다.
+> 현재 작업 우선순위는 [P0_PLAN.md](P0_PLAN.md)를 본다.
 
 ```
 C:\Users\kimse\capstone\
 │
-├── README.md                        ← 프로젝트 진입점
 ├── docs/                            ← 설계·작업 문서 (이 문서 포함)
+│   ├── README.md                    ← 문서 진입점
 │   ├── SYSTEM_OVERVIEW.md           ← 이 문서
 │   ├── INTEGRATION.md               ← 통합 설계 문서
 │   ├── ONNX_CUDA_Migration.md
 │   ├── FPGA_workflow.md
-│   ├── motor_porting_guide.md
-│   ├── motor_control_changes.md     ← 모터 제어 정본
+│   ├── motor_control.md             ← 모터 제어 정본
+│   ├── P0_PLAN.md                   ← P0 통합 계획
 │   └── OPEN_ISSUES.md               ← 미해결 항목 통합
 ├── scripts/                         ← 빌드 도구 (build_win.bat 등)
 ├── legacy/                          ← 미사용·레거시 격리
@@ -32,8 +32,8 @@ C:\Users\kimse\capstone\
 │   ├── cpp/
 │   │   ├── CMakeLists.txt
 │   │   ├── apps/ptcamera_tracker.cpp   ← 메인 PC 앱 소스
-│   │   ├── src/  control.cpp(PID) · detector.cpp(YOLO ONNX) · pipeline.cpp
-│   │   │         tracking.cpp(ByteTrack) · serial_port.cpp(T:/P:) · overlay · settings
+│   │   ├── src/  detector.cpp(YOLO ONNX) · pipeline.cpp
+│   │   │         tracking.cpp(ByteTrack) · serial_port.cpp(B:/P:/T:/M:) · overlay · settings
 │   │   ├── include/ptcamera/  settings.hpp(cameraIndex=1, 1920x1080) · serial_port.hpp
 │   │   └── build_win/ptcamera_tracker.exe  ← 빌드 결과물
 │   │
@@ -65,7 +65,6 @@ C:\Users\kimse\capstone\
        |-- HLS IP: CORDIC (방위각 계산)
        |-- HLS IP: Kalman  (표적 필터링)
        |-- HLS IP: ULN2003 (스테퍼 모터 드라이버)
-       |-- HLS IP: MTI     (영상 모션 감지)
        |
        +--> Pan 모터 (수평 회전)
        +--> Tilt 모터 (수직 회전)
@@ -118,7 +117,7 @@ cd C:\Users\kimse\capstone\antidrone
 [레이더] --(UART1)--> [FPGA ps_main.cpp]
                               |
                    uart_parse() -> CORDIC -> Kalman
-                   motor_update_hybrid / motor_update_full_host
+                   CORDIC/Kalman + motor_update_ai_bbox / motor_update_hybrid
                               |
                    xil_printf("[RADAR] T0:(x,y)mm ...")
                               |
@@ -133,11 +132,9 @@ cd C:\Users\kimse\capstone\antidrone
                 |                 |
                 |           ByteTracker
                 |                 |
-                |           ControlLoop PID
+                |           bbox 중심 오차 계산
                 |                 |
-                |      motorEnabled 시:
-                |        sendTiltCommand()  "T:±N\n" --> COM4 --> FPGA
-                |        sendPanCommand()   "P:±N\n" --> COM4 --> FPGA
+                |      motorEnabled 시 `B:ex,ey\n` --> COM4 --> FPGA
                 |
          UDP 9999 [RADAR] 텍스트
          UDP 9998  JPEG 640x360 프레임
@@ -158,22 +155,21 @@ cd C:\Users\kimse\capstone\antidrone
 
 ---
 
-## 5. FPGA 모터 제어 상태머신 (`ps_main.cpp:788~811`)
+## 5. FPGA 모터 제어 상태머신
 
-> 정본: [motor_control_changes.md](motor_control_changes.md). **Pan은 항상 레이더 방위각 전용**,
-> Tilt는 PC `T:` 명령 전용. MTI(온보드 퓨전)는 레거시 분리됨 — 퓨전 분기 없음.
+> 정본: [motor_control.md](motor_control.md). AI 추적에서는 PC가 bbox 오차만 보내고,
+> FPGA가 Pan/Tilt PID와 스텝 계산을 담당한다.
 
 | 모드 | 조건 | Pan 소스 | Tilt 소스 |
 |---|---|---|---|
-| **AI 추적** | `(pan\|\|tilt steps)!=0 & cooldown==0` | PC `P:±N` (직접 스텝) | PC `T:±N` (직접 스텝) |
-| **수동** | 위와 같음 + `g_manual_mode=true` | PC `P:±N` (minStep 없음) | PC `T:±N` (minStep 없음) |
+| **AI 추적** | `B:ex,ey` 수신 + `cooldown==0` | bbox ex PID | bbox ey PID |
+| **수동** | `M:1` + `P:/T:` + `cooldown==0` | PC `P:±N` 직접 스텝 | PC `T:±N` 직접 스텝 |
 | **AI 잠금** | `cooldown>0` 또는 `ai_lock_frames>0` | — (현재 위치 유지, 레이더 차단) | — |
-| **레이더 단독** | `rvc > 0` | 레이더 방위각 PID | PC `T:±N` 명령 |
+| **레이더 단독** | `rvc > 0` | 레이더 방위각 PID | 정지 |
 | **표적 없음** | `rvc == 0` | — (마지막 위치 유지) | — |
 
-> **Pan은 증분 PID.** 레이더 `rang`(0.1도)을 LP필터(α=0.4, `:767`)로 평활 후 `angle_to_px()` 픽셀 오차를
-> `motor_update_hybrid` PID에 입력한다(`KP=1.5, KD=0`). AI 명령 후 cooldown/ai_lock으로 레이더 차단.
-> **T: 단독 이동** — `:790`의 `Pan||Tilt` 조건으로 Pan 없이 Tilt만 명령 가능 (수동 모드 필수 기능).
+> 레이더 `rang`은 LP 필터로 평활 후 `angle_to_px()` 픽셀 오차를 `motor_update_hybrid()`에 입력한다.
+> AI 명령 후 `cooldown`/`ai_lock_frames` 동안 레이더 오버라이드를 차단한다.
 
 ---
 
@@ -183,14 +179,13 @@ cd C:\Users\kimse\capstone\antidrone
 
 | 명령 | 형식 | 설명 |
 |---|---|---|
-| Pan 스텝 | `P:±N\n` | N = 스텝 수. AI 추적 또는 수동 모드 Pan 이동 |
-| Tilt 스텝 | `T:±N\n` | N = 스텝 수. **Pan 없이 단독 작동 가능** |
+| AI 추적 | `B:ex,ey\n` | bbox 중심 오차. FPGA가 PID와 스텝 계산 |
+| Pan 스텝 | `P:±N\n` | 수동 모드 전용 |
+| Tilt 스텝 | `T:±N\n` | 수동 모드 전용 |
 | 수동 모드 진입 | `M:1\n` | minStep 제한 해제 — 정밀 이동 (캘리브레이션용) |
 | 수동 모드 해제 | `M:0\n` | 자동 추적 모드 복귀 |
 
-> T: 단독 이동은 `ps_main.cpp:790`의 `(pan||tilt steps) != 0` 조건으로 지원됨.
-> PC 측 각도→스텝 API: `sendPanDegrees()` / `sendTiltDegrees()` (`serial_port.cpp`),
-> 변환 상수 `STEPS_PER_DEGREE = 4096/360 ≈ 11.378` (`control.hpp`).
+> `P:/T:`는 `M:1` 수동 모드에서 캘리브레이션과 점검 용도로 사용한다.
 
 ### FPGA → PC (UART0, COM4, 256000bps)
 
@@ -205,7 +200,7 @@ cd C:\Users\kimse\capstone\antidrone
 |---|---|---|
 | 9999 | tracker → unified_gui | `[RADAR]` 텍스트 라인 |
 | 9998 | tracker → unified_gui | JPEG 640×360 카메라 프레임 |
-| 10000 | tracker → unified_gui | JSON 텔레메트리(FPS, target lock, confidence, pan/tilt step, motor/serial 상태) |
+| 10000 | tracker → unified_gui | JSON 텔레메트리(FPS, target lock, confidence, bbox 오차, motor 상태) |
 
 ### GUI 단독 점검
 

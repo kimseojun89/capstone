@@ -118,7 +118,7 @@ cd C:\Users\kimse\capstone\antidrone
 | IP | 주소 | 비고 |
 |---|---|---|
 | CORDIC (극좌표) | `0x40000000` | angle 출력 0.1도 단위 |
-| Kalman | `0x40010000` | ⚠️ 내부 DT=0.1, 루프=0.033 → vx/vy 약 3배 과대 (OPEN_ISSUES A2) |
+| Kalman | `0x40010000` | 소스 DT=0.033. 생성 IP/bitstream 반영 여부는 OPEN_ISSUES 확인 |
 | ~~MTI~~ | `0x40020000` | **레거시** — PL 잔존, SW 미사용 ([legacy/mti_subsystem](legacy/mti_subsystem/)) |
 | ULN2003 모터 | `0x40030000` | 0x10=target_pan, 0x18=target_tilt, 0x20=speed_delay(루프카운트) |
 
@@ -133,8 +133,8 @@ cd C:\Users\kimse\capstone\antidrone
 
 ## 미해결 항목
 
-[docs/OPEN_ISSUES.md](docs/OPEN_ISSUES.md) — Kalman DT 불일치(vx/vy ~3배), 모터 GPIO XDC 핀맵 미확정, UART 256000 어댑터 호환 등.
-(MTI 관련 A1/A3/A5는 레거시화로 해소)
+[docs/P0_PLAN.md](docs/P0_PLAN.md) — 문서 정합, GUI 시리얼 점유 제거, bbox 전송 주기 정합.
+[docs/OPEN_ISSUES.md](docs/OPEN_ISSUES.md) — Kalman IP 반영 확인, 모터 핀맵 실보드 검증, UART 256000 실측 등.
 
 ## 작업 규약
 

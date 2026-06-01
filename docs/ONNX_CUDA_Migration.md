@@ -33,7 +33,7 @@ capstone/
 │       ├── src/
 │       │   ├── detector.cpp             # ★ 전면 재작성
 │       │   ├── settings.cpp             # ★ 수정: 기본 모델 경로
-│       │   └── serial_port.cpp          # ★ 수정: Windows 스텁 추가
+│       │   └── serial_port.cpp          # WinAPI 시리얼 구현
 │       ├── apps/
 │       │   ├── detector_viewer.cpp      # ★ 수정: 필드명 업데이트
 │       │   ├── ptcamera_tracker.cpp     # ★ 수정: 필드명 업데이트
@@ -153,19 +153,9 @@ return (path / "models" / "drone_yolov8x" / "best_openvino_model").string();
 return (path / "models" / "drone_yolov8x" / "best.onnx").string();
 ```
 
-#### `serial_port.cpp` — Windows 스텁 추가
-```cpp
-#ifdef _WIN32
-// POSIX 시리얼 포트 미지원 → no-op 스텁
-bool SerialPort::openPort(...) { return false; }
-...
-#else
-// 기존 Linux POSIX 구현
-#include <poll.h>
-#include <termios.h>
-...
-#endif
-```
+#### `serial_port.cpp` — Windows WinAPI 시리얼 구현
+
+Windows에서는 `CreateFile`, `SetCommState`, `COMMTIMEOUTS`, `ReadFile`, `WriteFile` 기반으로 COM 포트를 직접 연다. `ptcamera_tracker.exe`가 COM4를 독점하고, FPGA 로그를 읽어 GUI로 UDP 릴레이한다.
 
 #### `CMakeLists.txt`
 ```cmake
@@ -259,9 +249,9 @@ cd C:\Users\kimse\capstone\antidrone\cpp\build_win
 .\tracking_viewer.exe
 ```
 
-### ptcamera_tracker (전체 시스템 — Linux/FPGA 보드 전용)
+### ptcamera_tracker (전체 시스템)
 ```bat
-.\ptcamera_tracker.exe --serial-port COM3  # Windows에서는 시리얼 미지원
+.\ptcamera_tracker.exe --serial-port COM4 --baud 256000 --enable-motor
 ```
 
 ---
@@ -303,4 +293,3 @@ cmake --build cpp/build
 | **FP16 최적화** | `yolo export ... half=True` → VRAM 사용량 절반, 추론 속도 향상 |
 | **TensorRT** | `onnxruntime_providers_tensorrt.dll` 이미 포함됨, `.engine` 파일 변환 시 최고 성능 |
 | **Windows 시리얼 포트** | `serial_port.cpp`에 WinAPI(`CreateFile`, `SetCommState`) 구현 추가 시 Windows에서도 FPGA 연동 가능 |
-| **빌드 스크립트 자동화** | 매 세션 환경 변수 설정 필요 → `.bat` 또는 CMake preset으로 자동화 권장 |

@@ -7,9 +7,7 @@
 > - `antidrone/cpp/src/serial_port.cpp` — UART 통신
 >
 > **최종 갱신:** 2026-06-01 (Phase 2 — FPGA-Only Control 반영)
-> **이 파일이 아래 4개를 대체함:**
-> `motor_control_analysis.md`, `motor_control_changes.md`,
-> `motor_control_deep_dive.md`, `motor_porting_guide.md`
+> 이 파일을 모터 제어 정본으로 사용한다.
 
 ---
 
@@ -54,10 +52,9 @@
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Phase 2 핵심 변화 (이전 대비):**
-- ❌ PC `control.cpp` PID → FPGA `motor_pid_step()` 중복 구조 해소
-- ✅ PC는 bbox 중심 오차(ex, ey)만 전송 — `B:ex,ey\n`
-- ✅ PID 계산(Pan+Tilt 모두) FPGA 단일 담당
+**Phase 2 핵심 구조:**
+- PC는 bbox 중심 오차(ex, ey)만 전송 — `B:ex,ey\n`
+- PID 계산(Pan+Tilt 모두)은 FPGA가 담당
 - `P:/T:` 명령은 수동 캘리브레이션(`M:1` 모드) 전용으로 격하
 
 ---
@@ -432,7 +429,7 @@ Row 5  │       GND        │
 
 | 증상 | 원인 | 조치 |
 |---|---|---|
-| 미세 진동 후 정지 | ✅ 정상 홈포지션 | — |
+| 미세 진동 후 정지 | 정상 홈포지션 | — |
 | 아무 반응 없음 | 5V 미공급 또는 공통 GND 누락 | 전원/GND 확인 |
 | 진동만, 회전 안 됨 | 탈조 — SPEED_DELAY 너무 낮음 | `SPEED_DELAY=300, MAX_STEP=38` |
 | 반대 방향 회전 | IN 핀 순서 반전 | IN1↔IN4, IN2↔IN3 스왑 |
