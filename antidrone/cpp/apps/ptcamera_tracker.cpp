@@ -315,14 +315,16 @@ int main(int argc, char** argv) {
                     conf = result.target->confidence;
                 }
                 char telemJson[256];
+                // pan_steps/tilt_steps → FPGA에서 계산, PC에서는 bbox 오차(err_x/y) 전송
                 const int n = snprintf(telemJson, sizeof(telemJson),
                     "{\"motor_enabled\":%s,\"target_found\":%s,"
-                    "\"pan_steps\":%d,\"tilt_steps\":%d,"
+                    "\"bbox_ex\":%d,\"bbox_ey\":%d,"
                     "\"center_x\":%.1f,\"center_y\":%.1f,"
                     "\"confidence\":%.3f,\"fps\":%.1f}",
                     motorEnabled ? "true" : "false",
                     telemetry.targetFound ? "true" : "false",
-                    telemetry.command.panSteps, telemetry.command.tiltSteps,
+                    static_cast<int>(telemetry.errorX),
+                    static_cast<int>(telemetry.errorY),
                     cx, cy, conf, static_cast<float>(fps));
                 if (n > 0 && n < static_cast<int>(sizeof(telemJson))) {
                     sendto(telemSock, telemJson, n, 0,
@@ -337,7 +339,6 @@ int main(int argc, char** argv) {
             }
             if (key == ' ') {
                 motorEnabled = !motorEnabled;
-                control.reset();
                 if (motorEnabled && !serial.isOpen()) {
                     motorEnabled = ensureSerialOpen(serial, settings);
                 }
@@ -350,7 +351,6 @@ int main(int argc, char** argv) {
                 }
                 if (manualMode) {
                     motorEnabled = false;
-                    control.reset();
                 }
                 std::cout << "Manual mode " << (manualMode ? "ON (arrows: 1deg, shift+arrows: 0.1deg)" : "OFF") << '\n';
             }

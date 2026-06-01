@@ -74,8 +74,9 @@ void drawOverlay(
     putLine(frame, telemetry.targetFound ? "LOCKED" : "NO TARGET", 35, cv::Scalar(0, 255, 255), 1.0);
     putLine(frame, std::string("MODE webcam/") + toString(telemetry.source), 65, cv::Scalar(200, 255, 255));
     putLine(frame,
-            "STEP pan " + std::to_string(telemetry.command.panSteps) + " tilt " +
-                std::to_string(telemetry.command.tiltSteps),
+            "BBOX ex " + std::to_string(static_cast<int>(telemetry.errorX)) +
+                " ey " + std::to_string(static_cast<int>(telemetry.errorY)) +
+                " →FPGA PID",
             95,
             cv::Scalar(0, 255, 0));
     putLine(frame,
@@ -83,18 +84,6 @@ void drawOverlay(
             125,
             cv::Scalar(255, 255, 0));
     putLine(frame, "DETECTIONS " + std::to_string(detectionCount), 155, cv::Scalar(0, 200, 255));
-    putLine(frame,
-            "PID pan " + formatDouble(telemetry.panControl, 2) + " tilt " +
-                formatDouble(telemetry.tiltControl, 2),
-            185,
-            cv::Scalar(180, 255, 180),
-            0.6);
-    putLine(frame,
-            "CMD pan " + formatDouble(telemetry.panCommand, 2) + " tilt " +
-                formatDouble(telemetry.tiltCommand, 2),
-            215,
-            cv::Scalar(200, 220, 255),
-            0.6);
     putLine(frame, "FPS " + formatDouble(fps, 1), 245, cv::Scalar(255, 255, 255), 0.6);
     putLine(frame, motorEnabled ? "MOTOR ON" : "MOTOR OFF", 275, motorEnabled ? cv::Scalar(80, 255, 80)
                                                                                : cv::Scalar(180, 180, 180));
