@@ -17,14 +17,21 @@ PC(Windows)가 영상 추론·관제, PYNQ-Z2 FPGA가 신호처리·모터 제�
 
 ## 핵심 컴포넌트 (코드 위치)
 
-| 컴포넌트 | 경로 | 역할 |
+### 직접 수정하는 소스 코드 전체
+
+| 영역 | 파일/경로 | 역할 |
 |---|---|---|
-| FPGA 베어메탈 | `antidrone/vitis_workspace/antidrone_app/src/ps_main.cpp` | 레이더 파싱·CORDIC·Kalman·퓨전·모터 제어 |
-| PC 트래커 | `antidrone/cpp/apps/ptcamera_tracker.cpp` | 카메라·YOLO·ByteTrack·PID·시리얼·UDP 릴레이 |
-| 트래커 설정 | `antidrone/cpp/include/ptcamera/settings.hpp` | 카메라/모터/YOLO 기본값 |
-| 통합 GUI | `antidrone/unified_gui.py` | 카메라+PPI 표시 **전용** (모터 명령 송신 안 함) |
-| 실행 진입점 | `antidrone/run_system.ps1` | 플래시→GUI→트래커 일괄 실행 |
-| HLS IP 소스 | `Vitis/{cordic_polar,kalman_filter,uln2003_controller}.cpp` | PL 가속 IP |
+| **FPGA PS (ARM)** | `antidrone/vitis_workspace/antidrone_app/src/ps_main.cpp` | 레이더 파싱·CORDIC·Kalman·모터 제어 |
+| **PC 트래커 진입점** | `antidrone/cpp/apps/ptcamera_tracker.cpp` | `main()` — 카메라·YOLO·ByteTrack·PID·시리얼·UDP 릴레이 |
+| **PC 트래커 구현부** | `antidrone/cpp/src/*.cpp` | control, detector, serial_port, tracking, pipeline, overlay, settings |
+| **PC 트래커 헤더** | `antidrone/cpp/include/ptcamera/*.hpp` | 타입 정의·인터페이스 (settings.hpp에 모든 기본값) |
+| **PL HLS IP 소스** | `Vitis/cordic_polar.cpp` | 극좌표 변환 IP — ps_main이 AXI 레지스터로 호출 |
+| **PL HLS IP 소스** | `Vitis/kalman_filter.cpp` | 칼만 필터 IP |
+| **PL HLS IP 소스** | `Vitis/uln2003_controller.cpp` | 스테퍼 모터 드라이버 IP |
+| **통합 GUI** | `antidrone/unified_gui.py` | 카메라+PPI 표시 **전용** (모터 명령 송신 안 함) |
+| **실행 진입점** | `antidrone/run_system.ps1` | 플래시→GUI→트래커 일괄 실행 |
+
+> `Vitis/*_prj/` 폴더는 HLS 합성 **산출물**이므로 소스가 아님. HLS IP는 `Vitis/*.cpp`를 합성해 PL에 올리고, `ps_main.cpp`는 그 결과를 AXI4-Lite 주소로 호출하는 관계 (독립적 빌드 경로).
 
 ## 빌드
 
@@ -54,29 +61,42 @@ cd C:\Users\kimse\capstone\antidrone
 ## 통신 프로토콜
 
 **PC → FPGA (UART0, COM4, 256000bps)** — `ptcamera_tracker.exe`가 COM4 독점, GUI는 시리얼로 모터 송신 안 함:
-- `P:±N\n` Pan 직접 스텝 (N=8~48, FPGA가 5~58로 클램프) → AI 추적 모드 진입
-- `T:±N\n` Tilt 직접 스텝 → 퓨전/레이더 단독 모드의 Tilt
-- FPGA는 매 프레임(33ms) 끝에 `g_host_pan/tilt_steps`를 0으로 리셋 → 30Hz 재전송 필요
 
-**FPGA → PC (UART0)**: `[RADAR] T0:(x,y)mm spd=Ncm/s | dist=Nmm ang=N.Ndeg` + `[UART]/[MTI]/[FUSE]/[KALM]` 로그.
+| 명령 | 형식 | 설명 |
+|---|---|---|
+| Pan 스텝 | `P:±N\n` | N=스텝 수. AI 추적 또는 수동 모드 Pan 이동 |
+| Tilt 스텝 | `T:±N\n` | N=스텝 수. **Pan 없이 단독 작동 가능** (FPGA `:790` `\|\|` 조건) |
+| 수동 모드 진입 | `M:1\n` | minStep 제한 해제 → 1스텝(0.088°) 정밀 이동. 캘리브레이션용 |
+| 수동 모드 해제 | `M:0\n` | 자동 추적 모드 복귀 |
+
+> FPGA는 매 프레임(33ms) 끝에 `g_host_pan/tilt_steps`를 0으로 리셋 → AI 추적 시 30Hz 재전송 필요.
+> 수동 모드(`M:1`)에서는 명령 1회로 해당 스텝만 이동 후 정지(쿨다운 없음).
+
+**PC 측 각도→스텝 변환** (`control.hpp`): `STEPS_PER_DEGREE = 4096/360 ≈ 11.378`
+- `degreesToSteps(1.0)` → 11 스텝 (≈ 0.088°/스텝)
+- `sendPanDegrees(deg)` / `sendTiltDegrees(deg)` — SerialPort API
+
+**FPGA → PC (UART0)**: `[RADAR] T0:(x,y)mm spd=Ncm/s | dist=Nmm ang=N.Ndeg` + `[UART]/[KALM]` 로그.
 
 **PC 내부 UDP (localhost)** — tracker → unified_gui:
 - `9998` 카메라 JPEG 640×360 · `9999` `[RADAR]` 텍스트 · `10000` JSON 텔레메트리(FPS/AI/Motor/Serial)
 
-## FPGA 모터 상태머신 (`ps_main.cpp:944~973`)
+## FPGA 모터 상태머신 (`ps_main.cpp:788~811`)
 
-우선순위 분기. **Pan은 항상 레이더 방위각, 증분 PID**(절대 SET 아님). Tilt만 모드별 분기.
+우선순위 분기. **Pan은 항상 레이더 방위각, 증분 PID**(절대 SET 아님). Tilt는 PC `T:` 명령 전용.
+MTI(온보드 퓨전)는 레거시 분리됨 → 퓨전 분기 없음. 영상 탐지는 PC YOLO 전담.
 
 | 모드 | 조건 | Pan | Tilt |
 |---|---|---|---|
-| AI 추적 | `g_host_pan_steps!=0 && cooldown==0` | PC `P:` 직접 | PC `T:` 직접 |
+| AI 추적 | `(pan\|\|tilt steps) != 0 && cooldown==0` | PC `P:` 직접 | PC `T:` 직접 |
+| 수동 | `M:1` + `P:/T:` | PC `P:` (minStep 없음) | PC `T:` (minStep 없음) |
 | AI 잠금 | `cooldown>0` or `ai_lock_frames>0` | 위치 유지(레이더 차단) | 유지 |
-| 퓨전 | `fi>=0` | 레이더 `angle_to_px(rang)` PID | 카메라 BBox cy PID |
-| 레이더 단독 | `rvc>0 && fi<0` | 레이더 PID | PC `T:` 직접 |
+| 레이더 단독 | `rvc>0` | 레이더 `angle_to_px(rang)` PID | PC `T:` 직접 |
 | 표적 없음 | `rvc==0` | 마지막 위치 유지 | — |
 
-- 레이더 `rang`은 LP필터(α=0.4, `:922`)로 평활 후 PID 입력 → 좌우 지터 억제.
+- 레이더 `rang`은 LP필터(α=0.4, `:767`)로 평활 후 PID 입력 → 좌우 지터 억제.
 - AI 명령 후 `cooldown`/`ai_lock_frames` 동안 레이더 오버라이드 차단 → PC 추적 연속성 보장.
+- 수동 모드(`g_manual_mode`, `:205`)에서는 `motor_update_full_host`의 minStep 클램프 해제 (`:689`).
 - 상세/튜닝: [docs/motor_control_changes.md](docs/motor_control_changes.md), [docs/motor_porting_guide.md](docs/motor_porting_guide.md).
 
 ## 주요 설정값 (코드 실측)
@@ -86,13 +106,15 @@ cd C:\Users\kimse\capstone\antidrone
 | 카메라 | index 1, 1920×1080 (ABKO APC900) | `settings.hpp:9~11` |
 | 추론 | YOLOv8x ONNX, CUDA(RTX 3050) | `settings.hpp:16`, `models/drone_yolov8x/best.onnx` |
 | 시리얼 | COM4 @ 256000 (tracker 독점) | `run_system.ps1`, `settings.hpp:59` |
-| 모터 PID | KP=1.5, KD=0.0 | `ps_main.cpp:101,102` |
-| 모터 스텝 | MIN=5, MAX=58, deadband 35px | `ps_main.cpp:103~110` |
-| 모터 속도 | SPEED_DELAY=200 (154°/s; 탈조 시 300/MAX38) | `ps_main.cpp:120` |
-| 슬루/주기 | CMD_RAMP=20.0, DT=0.033(30Hz) | `ps_main.cpp:112,122` |
-| 컴파일 스위치 | `USE_MOCK_MTI=1`, `DISABLE_MTI=1`, `USE_HLS_CORDIC/KALMAN=1`, `LOG_LEVEL=1` | `ps_main.cpp:30~43` |
+| 모터 PID | KP=1.5, KD=0.0 | `ps_main.cpp:75,76` |
+| 모터 스텝 | MIN=5, MAX=58, deadband 35px | `ps_main.cpp:77,81,82` |
+| 모터 속도 | SPEED_DELAY=200 (154°/s; 탈조 시 300/MAX38) | `ps_main.cpp:94` |
+| 슬루/주기 | CMD_RAMP=20.0, DT=0.033(30Hz) | `ps_main.cpp:86,96` |
+| 각도/스텝 변환 | `STEPS_PER_DEGREE = 4096/360 ≈ 11.378` | `control.hpp` |
+| 컴파일 스위치 | `USE_HLS_CORDIC/KALMAN=1`, `LOG_LEVEL=1` | `ps_main.cpp:30~32` |
+| 수동 모드 전역 | `g_manual_mode` (M:1/M:0으로 토글) | `ps_main.cpp:205` |
 
-> ⚠️ `MOTOR_ACQUIRE_RAMP`는 `:121`에서 0.6f 정의 후 `:128` `#undef`→`:129` 1.0f 재정의 → **유효값 1.0f**.
+> `MOTOR_ACQUIRE_RAMP=1.0f`(`:95`, 가속 억제 없음). 구버전의 0.6f→#undef→1.0f 중복 정의는 정리됨.
 
 ## HLS IP 주소맵
 
@@ -100,7 +122,7 @@ cd C:\Users\kimse\capstone\antidrone
 |---|---|---|
 | CORDIC (극좌표) | `0x40000000` | angle 출력 0.1도 단위 |
 | Kalman | `0x40010000` | ⚠️ 내부 DT=0.1, 루프=0.033 → vx/vy 약 3배 과대 (OPEN_ISSUES A2) |
-| MTI | `0x40020000` | 현재 `DISABLE_MTI=1`, Mock 상태 |
+| ~~MTI~~ | `0x40020000` | **레거시** — PL 잔존, SW 미사용 ([legacy/mti_subsystem](legacy/mti_subsystem/)) |
 | ULN2003 모터 | `0x40030000` | 0x10=target_pan, 0x18=target_tilt, 0x20=speed_delay(루프카운트) |
 
 ## 재빌드 기준
@@ -114,10 +136,11 @@ cd C:\Users\kimse\capstone\antidrone
 
 ## 미해결 항목
 
-[docs/OPEN_ISSUES.md](docs/OPEN_ISSUES.md) — MTI 실카메라 미연결(Mock), Kalman DT 불일치, 모터 GPIO XDC 핀맵 미확정, UART 256000 어댑터 호환 등.
+[docs/OPEN_ISSUES.md](docs/OPEN_ISSUES.md) — Kalman DT 불일치(vx/vy ~3배), 모터 GPIO XDC 핀맵 미확정, UART 256000 어댑터 호환 등.
+(MTI 관련 A1/A3/A5는 레거시화로 해소)
 
 ## 작업 규약
 
 - 문서(`docs/`)는 한국어. **코드와 문서가 다르면 코드를 신뢰**하고 문서를 갱신할 것.
 - 빌드 산출물(`build_win/`, `*.elf`, `*.bit`)·대용량 바이너리(`*.onnx`, `*.pt`)는 git 미추적(`.gitignore`).
-- 미사용/레거시는 `legacy/`로 격리됨 (`ppi_viewer.py` 등).
+- 미사용/레거시는 `legacy/`로 격리됨 (`mti_subsystem/`, `ppi_viewer.py`, `serial_stepper_test.cpp` 등).

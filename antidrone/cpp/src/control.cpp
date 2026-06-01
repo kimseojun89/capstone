@@ -168,4 +168,12 @@ std::pair<double, int> ControlLoop::updateAxis(
     return {targetCommand, axis.stepFromCommand(smoothedCommand)};
 }
 
+int degreesToSteps(double degrees) {
+    return static_cast<int>(std::round(degrees * STEPS_PER_DEGREE));
+}
+
+double stepsToDegrees(int steps) {
+    return static_cast<double>(steps) / STEPS_PER_DEGREE;
+}
+
 }  // namespace ptcamera

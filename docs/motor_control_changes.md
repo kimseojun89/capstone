@@ -208,6 +208,73 @@ rang = (int16_t)rang_lp;
 
 ---
 
+### 수정 7 — AI 추적 진입 조건 수정 (`ps_main.cpp:790`): Tilt 단독 이동 허용
+
+**증상:** 캘리브레이션 스크립트에서 Tilt 단독 이동 시 `P:+1\n` 더미 Pan 명령이 필수적으로 필요
+
+**원인:** 상태머신 진입 조건이 `g_host_pan_steps != 0`만 확인 → Pan=0이면 Tilt 명령도 무시
+
+```c
+// 변경 전
+if (g_host_pan_steps != 0 && g_host_cmd_cooldown == 0) {
+
+// 변경 후
+if ((g_host_pan_steps != 0 || g_host_tilt_steps != 0) && g_host_cmd_cooldown == 0) {
+```
+
+**효과:** `T:+N\n` 단독 전송으로 Tilt 이동 가능. 캘리브레이션 스크립트의 `P:+1` 해킹 제거.
+
+---
+
+### 수정 8 — 수동 모드 `M:` 명령 추가 (`ps_main.cpp:205, 258, 689`)
+
+**목적:** 캘리브레이션용 정밀 이동 — minStep(5) 제한 없이 1스텝(≈0.088°) 단위 이동
+
+**구현:**
+```c
+// 전역 변수 (ps_main.cpp:205)
+static bool g_manual_mode = false;
+
+// host_parse_commands() 내 파서 (ps_main.cpp:258)
+else if (cmd == 'M') g_manual_mode = (val != 0);
+
+// motor_update_full_host() 분기 (ps_main.cpp:689)
+if (!g_manual_mode) {
+    // 자동 모드: MIN_STEP ~ MAX_STEP 클램프 유지
+} else {
+    // 수동 모드: MAX_STEP만 클램프, minStep 제한 없음
+}
+```
+
+**프로토콜:**
+- `M:1\n` → 수동 모드 진입 (캘리브레이션 시작 시)
+- `M:0\n` → 자동 모드 복귀 (캘리브레이션 완료 후)
+
+**PC 측 API (`serial_port.hpp`):**
+```cpp
+bool sendManualMode(bool enable);      // M:1 / M:0
+bool sendPanDegrees(double degrees);   // 각도→스텝 변환 후 P:±N
+bool sendTiltDegrees(double degrees);  // 각도→스텝 변환 후 T:±N
+```
+
+---
+
+### 수정 9 — 각도↔스텝 변환 유틸리티 추가 (`control.hpp`)
+
+**목적:** 캘리브레이션 스크립트·수동 모드에서 각도 단위 인터페이스 제공
+
+```cpp
+// control.hpp
+constexpr double STEPS_PER_DEGREE = 4096.0 / 360.0;  // ≈ 11.378 스텝/도
+
+int    degreesToSteps(double degrees);   // round(degrees × 11.378)
+double stepsToDegrees(int steps);        // steps / 11.378
+```
+
+**검증:** `degreesToSteps(1.0) == 11`, `degreesToSteps(360.0) == 4096`
+
+---
+
 ## 속도 공식 참고
 
 ```

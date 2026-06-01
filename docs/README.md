@@ -19,13 +19,16 @@ PC(Windows)에서 영상 추론·관제, PYNQ-Z2 FPGA에서 신호처리·모터
 capstone/
 ├── README.md              ← 이 문서 (진입점)
 ├── docs/                  ← 모든 설계·작업 문서
-│   ├── SYSTEM_OVERVIEW.md     전체 구조·실행·프로토콜 (기준 문서)
-│   ├── INTEGRATION.md         PC↔FPGA 통합 설계
-│   ├── ONNX_CUDA_Migration.md OpenVINO→ONNX CUDA 전환 기록
-│   ├── FPGA_workflow.md       HLS→Vivado→Vitis 빌드 흐름
-│   ├── motor_porting_guide.md 모터 핀맵·속도 튜닝
-│   ├── motor_control_changes.md 모터 제어 수정 이력(정본)
-│   └── OPEN_ISSUES.md         미해결 항목 통합 ★
+│   ├── SYSTEM_OVERVIEW.md         전체 구조·실행·프로토콜 (기준 문서)
+│   ├── INTEGRATION.md             PC↔FPGA 통합 설계
+│   ├── ONNX_CUDA_Migration.md     OpenVINO→ONNX CUDA 전환 기록
+│   ├── FPGA_workflow.md           HLS→Vivado→Vitis 빌드 흐름
+│   ├── motor_porting_guide.md     모터 핀맵·속도 튜닝
+│   ├── motor_control_changes.md   모터 제어 수정 이력(정본) ★
+│   ├── motor_control_deep_dive.md 모터 제어 코드 상세 동작 (HLS IP↔PS 연동)
+│   ├── motor_control_analysis.md  모터 제어 분석·수정 방향 (캘리브레이션 맥락)
+│   ├── PANTILT_CALIBRATION_WORKFLOW.md Pan/Tilt 웹캠 ChArUco 캘리브레이션 워크플로우
+│   └── OPEN_ISSUES.md             미해결 항목 통합 ★
 ├── scripts/               ← 빌드·점검 도구
 │   ├── build_win.bat          호스트 C++ 앱 빌드 (Windows)
 │   ├── gui_udp_sim.py         통합 GUI용 가짜 UDP 송신기 (보드 없이 화면 점검)

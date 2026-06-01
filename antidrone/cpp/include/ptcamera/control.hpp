@@ -85,4 +85,10 @@ private:
     bool hadTarget_ = false;
 };
 
+// 각도 ↔ 스텝 변환 상수 (28BYJ-48 하프스텝: 4096 steps/rev)
+constexpr double STEPS_PER_DEGREE = 4096.0 / 360.0;  // ≈ 11.378
+
+int degreesToSteps(double degrees);
+double stepsToDegrees(int steps);
+
 }  // namespace ptcamera

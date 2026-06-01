@@ -158,23 +158,22 @@ cd C:\Users\kimse\capstone\antidrone
 
 ---
 
-## 5. FPGA 모터 제어 상태머신 (`ps_main.cpp:944~973`)
+## 5. FPGA 모터 제어 상태머신 (`ps_main.cpp:788~811`)
 
-> 정본: [motor_control_changes.md](motor_control_changes.md). **Pan은 항상 안테나(레이더) 방위각 전용**,
-> Tilt만 상황(카메라 퓨전 여부)에 따라 분기. **Pan/Tilt 모두 증분 PID**(`g_motor_abs_pan += dpan`).
+> 정본: [motor_control_changes.md](motor_control_changes.md). **Pan은 항상 레이더 방위각 전용**,
+> Tilt는 PC `T:` 명령 전용. MTI(온보드 퓨전)는 레거시 분리됨 — 퓨전 분기 없음.
 
 | 모드 | 조건 | Pan 소스 | Tilt 소스 |
 |---|---|---|---|
-| **AI 트래킹** | `g_host_pan_steps != 0` & `cooldown==0` | PC `P:±N` (직접 스텝) | PC `T:±N` (직접 스텝) |
+| **AI 추적** | `(pan\|\|tilt steps)!=0 & cooldown==0` | PC `P:±N` (직접 스텝) | PC `T:±N` (직접 스텝) |
+| **수동** | 위와 같음 + `g_manual_mode=true` | PC `P:±N` (minStep 없음) | PC `T:±N` (minStep 없음) |
 | **AI 잠금** | `cooldown>0` 또는 `ai_lock_frames>0` | — (현재 위치 유지, 레이더 차단) | — |
-| **퓨전** | `fi >= 0` | 레이더 방위각 PID | 카메라 BBox `cy` PID |
-| **레이더 단독** | `rvc > 0` & `fi < 0` | 레이더 방위각 PID | PC `T:±N` 명령 |
+| **레이더 단독** | `rvc > 0` | 레이더 방위각 PID | PC `T:±N` 명령 |
 | **표적 없음** | `rvc == 0` | — (마지막 위치 유지) | — |
 
-> **Pan은 절대 SET이 아니라 증분 PID.** 레이더 각도 `rang`(0.1도)을 LP필터(α=0.4)로 평활한 뒤
-> `angle_to_px(rang)` 픽셀 오차를 `motor_update`/`motor_update_hybrid`의 PID에 입력한다(`KP=1.5, KD=0`).
-> AI 명령 후에는 `cooldown`/`ai_lock_frames` 동안 레이더 오버라이드를 차단해 PC 추적 연속성을 보장.
-> (구버전 문서의 `g_motor_abs_pan = -(rang/10×4096/360)` 절대 변환 서술은 현재 코드에 없음.)
+> **Pan은 증분 PID.** 레이더 `rang`(0.1도)을 LP필터(α=0.4, `:767`)로 평활 후 `angle_to_px()` 픽셀 오차를
+> `motor_update_hybrid` PID에 입력한다(`KP=1.5, KD=0`). AI 명령 후 cooldown/ai_lock으로 레이더 차단.
+> **T: 단독 이동** — `:790`의 `Pan||Tilt` 조건으로 Pan 없이 Tilt만 명령 가능 (수동 모드 필수 기능).
 
 ---
 
@@ -184,15 +183,21 @@ cd C:\Users\kimse\capstone\antidrone
 
 | 명령 | 형식 | 설명 |
 |---|---|---|
-| Tilt 명령 | `T:±N\n` | N = 스텝 수 (8~48), 음수=아래 |
-| Pan 명령  | `P:±N\n` | N = 스텝 수 (8~48), 음수=왼쪽 |
+| Pan 스텝 | `P:±N\n` | N = 스텝 수. AI 추적 또는 수동 모드 Pan 이동 |
+| Tilt 스텝 | `T:±N\n` | N = 스텝 수. **Pan 없이 단독 작동 가능** |
+| 수동 모드 진입 | `M:1\n` | minStep 제한 해제 — 정밀 이동 (캘리브레이션용) |
+| 수동 모드 해제 | `M:0\n` | 자동 추적 모드 복귀 |
+
+> T: 단독 이동은 `ps_main.cpp:790`의 `(pan||tilt steps) != 0` 조건으로 지원됨.
+> PC 측 각도→스텝 API: `sendPanDegrees()` / `sendTiltDegrees()` (`serial_port.cpp`),
+> 변환 상수 `STEPS_PER_DEGREE = 4096/360 ≈ 11.378` (`control.hpp`).
 
 ### FPGA → PC (UART0, COM4, 256000bps)
 
 | 로그 | 형식 | 설명 |
 |---|---|---|
 | 레이더 데이터 | `[RADAR] T0:(x,y)mm spd=Ncm/s` | 표적 좌표 (mm) |
-| 상태 로그 | `[UART] [MTI] [FUSE] [KALM]` | 진단 정보 |
+| 상태 로그 | `[UART] [KALM]` | 진단 정보 (MTI/FUSE는 레거시화로 제거) |
 
 ### PC 내부 UDP (localhost)
 
@@ -251,11 +256,13 @@ cmake --build build_win --target ptcamera_tracker
 | 시리얼 포트 | COM4 | `run_system.ps1` |
 | YOLO 모델 | `models/drone_yolov8x/best.onnx` | `settings.cpp` |
 | 추론 장치 | CUDA (RTX 3050) | `settings.hpp` |
-| 모터 속도 딜레이 | 200 (154°/s; 탈조 시 300으로) | `ps_main.cpp:120` |
-| 모터 PID KP / KD / MAX_STEP | KP=1.5 / KD=0.0 / 58 | `ps_main.cpp:101,102,108` |
-| 레이더 rang LP필터 | α=0.4 (지터 억제) | `ps_main.cpp:922` |
-| Pan deadband | 35 px | `ps_main.cpp:103`, `settings.hpp` |
-| Tilt deadband | 35 px | `ps_main.cpp:104`, `settings.hpp` |
+| 모터 속도 딜레이 | 200 (154°/s; 탈조 시 300으로) | `ps_main.cpp:94` |
+| 모터 PID KP / KD / MAX_STEP | KP=1.5 / KD=0.0 / 58 | `ps_main.cpp:75,76,82` |
+| 레이더 rang LP필터 | α=0.4 (지터 억제) | `ps_main.cpp:767` |
+| Pan deadband | 35 px | `ps_main.cpp:77`, `settings.hpp` |
+| Tilt deadband | 35 px | `ps_main.cpp:78`, `settings.hpp` |
+| 각도/스텝 변환 | `STEPS_PER_DEGREE = 4096/360 ≈ 11.378` | `control.hpp` |
+| 수동 모드 전역 | `g_manual_mode` (M:1/M:0 토글) | `ps_main.cpp:205` |
 | 레이더 최대 거리 | 8000 mm | `unified_gui.py` |
 | PPI FOV | 120 도 | `unified_gui.py` |
 
