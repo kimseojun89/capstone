@@ -1,0 +1,40 @@
+[
+  {
+    "id": 0,
+    "insert_position": "",
+    "functionName": "mti_process",
+    "label": "",
+    "functionLabel": "",
+    "success": false,
+    "slx": false,
+    "ifcond": "",
+    "sourceFile": "C:\/Users\/kimse\/capstone\/Vitis\/mti_process_prj\/solution1\/directives.tcl",
+    "sourceLine": 7,
+    "pragma": {
+      "name": "TOP",
+      "option": [{
+          "name": "name",
+          "value": "mti_process"
+        }]
+    }
+  },
+  {
+    "id": 1,
+    "insert_position": "",
+    "functionName": "mti_process",
+    "label": "",
+    "functionLabel": "",
+    "success": false,
+    "slx": false,
+    "ifcond": "",
+    "sourceFile": "C:\/Users\/kimse\/capstone\/Vitis\/mti_process_prj\/solution1\/csynth.tcl",
+    "sourceLine": 15,
+    "pragma": {
+      "name": "TOP",
+      "option": [{
+          "name": "name",
+          "value": "mti_process"
+        }]
+    }
+  }
+]

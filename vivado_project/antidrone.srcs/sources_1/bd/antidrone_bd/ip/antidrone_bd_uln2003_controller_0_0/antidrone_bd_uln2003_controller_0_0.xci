@@ -4,7 +4,7 @@
     "xci_name": "antidrone_bd_uln2003_controller_0_0",
     "cell_name": "uln2003_controller_0",
     "component_reference": "xilinx.com:hls:uln2003_controller:1.0",
-    "ip_revision": "2114618762",
+    "ip_revision": "2114634707",
     "gen_directory": "../../../../../../antidrone.gen/sources_1/bd/antidrone_bd/ip/antidrone_bd_uln2003_controller_0_0",
     "parameters": {
       "component_parameters": {
@@ -34,7 +34,7 @@
       },
       "runtime_parameters": {
         "IPCONTEXT": [ { "value": "IP_Integrator" } ],
-        "IPREVISION": [ { "value": "2114618762" } ],
+        "IPREVISION": [ { "value": "2114634707" } ],
         "MANAGED": [ { "value": "TRUE" } ],
         "OUTPUTDIR": [ { "value": "../../../../../../antidrone.gen/sources_1/bd/antidrone_bd/ip/antidrone_bd_uln2003_controller_0_0" } ],
         "SELECTEDSIMMODEL": [ { "value": "" } ],

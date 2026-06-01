@@ -2148,21 +2148,21 @@
       },
       "uln2003_controller_0": {
         "vlnv": "xilinx.com:hls:uln2003_controller:1.0",
-        "ip_revision": "2114618762",
+        "ip_revision": "2114634707",
         "xci_name": "antidrone_bd_uln2003_controller_0_0",
         "xci_path": "ip\\antidrone_bd_uln2003_controller_0_0\\antidrone_bd_uln2003_controller_0_0.xci",
         "inst_hier_path": "uln2003_controller_0"
       },
       "kalman_filter_0": {
         "vlnv": "xilinx.com:hls:kalman_filter:1.0",
-        "ip_revision": "2114628909",
+        "ip_revision": "2114634708",
         "xci_name": "antidrone_bd_kalman_filter_0_1",
         "xci_path": "ip\\antidrone_bd_kalman_filter_0_1\\antidrone_bd_kalman_filter_0_1.xci",
         "inst_hier_path": "kalman_filter_0"
       },
       "cordic_polar_0": {
         "vlnv": "xilinx.com:hls:cordic_polar:1.0",
-        "ip_revision": "2114618772",
+        "ip_revision": "2114634709",
         "xci_name": "antidrone_bd_cordic_polar_0_1",
         "xci_path": "ip\\antidrone_bd_cordic_polar_0_1\\antidrone_bd_cordic_polar_0_1.xci",
         "inst_hier_path": "cordic_polar_0"
@@ -3316,8 +3316,6 @@
         "ports": [
           "proc_sys_reset_0/peripheral_aresetn",
           "mti_process_0/ap_rst_n",
-          "cordic_polar_0/ap_rst_n",
-          "uln2003_controller_0/ap_rst_n",
           "ps7_0_axi_periph/S00_ARESETN",
           "ps7_0_axi_periph/M00_ARESETN",
           "ps7_0_axi_periph/ARESETN",
@@ -3327,7 +3325,9 @@
           "ps7_0_axi_periph/S01_ARESETN",
           "ps7_0_axi_periph/S02_ARESETN",
           "ps7_0_axi_periph/S03_ARESETN",
-          "kalman_filter_0/ap_rst_n"
+          "cordic_polar_0/ap_rst_n",
+          "kalman_filter_0/ap_rst_n",
+          "uln2003_controller_0/ap_rst_n"
         ]
       },
       "ps7_0_FCLK_CLK0": {
@@ -3337,8 +3337,6 @@
           "proc_sys_reset_0/slowest_sync_clk",
           "rst_clk_wiz_100M/slowest_sync_clk",
           "mti_process_0/ap_clk",
-          "cordic_polar_0/ap_clk",
-          "uln2003_controller_0/ap_clk",
           "ps7_0_axi_periph/ACLK",
           "ps7_0_axi_periph/S00_ACLK",
           "ps7_0_axi_periph/M00_ACLK",
@@ -3348,7 +3346,9 @@
           "ps7_0_axi_periph/S01_ACLK",
           "ps7_0_axi_periph/S02_ACLK",
           "ps7_0_axi_periph/S03_ACLK",
-          "kalman_filter_0/ap_clk"
+          "cordic_polar_0/ap_clk",
+          "kalman_filter_0/ap_clk",
+          "uln2003_controller_0/ap_clk"
         ]
       },
       "ps7_0_FCLK_RESET0_N": {

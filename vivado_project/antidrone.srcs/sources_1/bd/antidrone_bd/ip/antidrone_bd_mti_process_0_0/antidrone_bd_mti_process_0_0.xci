@@ -5,7 +5,7 @@
     "cell_name": "mti_process_0",
     "component_reference": "xilinx.com:hls:mti_process:1.0",
     "ip_revision": "2114565504",
-    "gen_directory": "../../../../../../antidrone.gen/sources_1/bd/antidrone_bd/ip/antidrone_bd_mti_process_0_0",
+    "gen_directory": ".",
     "parameters": {
       "component_parameters": {
         "C_M_AXI_GMEM0_ENABLE_ID_PORTS": [ { "value": "true", "resolve_type": "user", "format": "bool", "usage": "all" } ],
@@ -104,8 +104,9 @@
       "runtime_parameters": {
         "IPCONTEXT": [ { "value": "IP_Integrator" } ],
         "IPREVISION": [ { "value": "2114565504" } ],
+        "LOCKEDBYUSER": [ { "value": "TRUE" } ],
         "MANAGED": [ { "value": "TRUE" } ],
-        "OUTPUTDIR": [ { "value": "../../../../../../antidrone.gen/sources_1/bd/antidrone_bd/ip/antidrone_bd_mti_process_0_0" } ],
+        "OUTPUTDIR": [ { "value": "." } ],
         "SELECTEDSIMMODEL": [ { "value": "" } ],
         "SHAREDDIR": [ { "value": "../../ipshared" } ],
         "SWVERSION": [ { "value": "2023.2" } ],

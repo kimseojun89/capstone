@@ -4,7 +4,7 @@
     "xci_name": "antidrone_bd_cordic_polar_0_1",
     "cell_name": "cordic_polar_0",
     "component_reference": "xilinx.com:hls:cordic_polar:1.0",
-    "ip_revision": "2114618772",
+    "ip_revision": "2114634709",
     "gen_directory": "../../../../../../antidrone.gen/sources_1/bd/antidrone_bd/ip/antidrone_bd_cordic_polar_0_1",
     "parameters": {
       "component_parameters": {
@@ -34,7 +34,7 @@
       },
       "runtime_parameters": {
         "IPCONTEXT": [ { "value": "IP_Integrator" } ],
-        "IPREVISION": [ { "value": "2114618772" } ],
+        "IPREVISION": [ { "value": "2114634709" } ],
         "MANAGED": [ { "value": "TRUE" } ],
         "OUTPUTDIR": [ { "value": "../../../../../../antidrone.gen/sources_1/bd/antidrone_bd/ip/antidrone_bd_cordic_polar_0_1" } ],
         "SELECTEDSIMMODEL": [ { "value": "" } ],

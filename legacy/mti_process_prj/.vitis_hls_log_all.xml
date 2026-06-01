@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<vivadoHLSLog:LogRoot xmlns:vivadoHLSLog="www.xilinx.com/vivadoHLSLog">
+  <errorLogs>
+    <logs>
+      <synLog>
+        <logs message="Error in linking the design.&#xD;&#xA;    while executing&#xD;&#xA;&quot;source C:/Users/kimse/capstone/Vitis/mti_process_prj/solution1/csynth.tcl&quot;&#xD;&#xA;    invoked from within&#xD;&#xA;&quot;hls::main C:/Users/kimse/capstone/Vitis/mti_process_prj/solution1/csynth.tcl&quot;&#xD;&#xA;    (&quot;uplevel&quot; body line 1)&#xD;&#xA;    invoked from within&#xD;&#xA;&quot;uplevel 1 hls::main {*}$newargs&quot;&#xD;&#xA;    (procedure &quot;hls_proc&quot; line 16)&#xD;&#xA;    invoked from within&#xD;&#xA;&quot;hls_proc [info nameofexecutable] $argv&quot;" projectName="mti_process_prj" solutionName="solution1" date="2026-06-01T17:40:30.053+0900"/>
+        <logs message="ERROR: [HLS 200-70] Cannot find any design unit to elaborate." projectName="mti_process_prj" solutionName="solution1" date="2026-06-01T17:40:30.043+0900"/>
+      </synLog>
+      <simLog/>
+      <mgLog/>
+      <packageLog/>
+      <csimLog/>
+    </logs>
+  </errorLogs>
+  <warningLogs>
+    <logs>
+      <synLog>
+        <logs message="WARNING: [HLS 200-1986] Could not apply TOP directive, invalid function, label, or variable (C:/Users/kimse/capstone/Vitis/mti_process_prj/solution1/csynth.tcl:15)" projectName="mti_process_prj" solutionName="solution1" date="2026-06-01T17:40:30.011+0900" type="Warning"/>
+        <logs message="WARNING: [HLS 200-1986] Could not apply TOP directive, invalid function, label, or variable (C:/Users/kimse/capstone/Vitis/mti_process_prj/solution1/directives.tcl:7)" projectName="mti_process_prj" solutionName="solution1" date="2026-06-01T17:40:29.996+0900" type="Warning"/>
+        <logs message="WARNING: [HLS 200-40] Cannot find source file mti_hls_final.cpp; skipping it." projectName="mti_process_prj" solutionName="solution1" date="2026-06-01T17:40:29.962+0900" type="Warning"/>
+        <logs message="WARNING: [HLS 200-40] Cannot find design file 'mti_hls_final.cpp'" projectName="mti_process_prj" solutionName="solution1" date="2026-06-01T17:40:28.936+0900" type="Warning"/>
+      </synLog>
+      <simLog/>
+      <mgLog/>
+      <packageLog/>
+      <csimLog/>
+    </logs>
+  </warningLogs>
+</vivadoHLSLog:LogRoot>
