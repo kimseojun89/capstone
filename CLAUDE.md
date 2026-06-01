@@ -22,8 +22,8 @@ PC(Windows)가 영상 추론·관제, PYNQ-Z2 FPGA가 신호처리·모터 제�
 | 영역 | 파일/경로 | 역할 |
 |---|---|---|
 | **FPGA PS (ARM)** | `antidrone/vitis_workspace/antidrone_app/src/ps_main.cpp` | 레이더 파싱·CORDIC·Kalman·모터 제어 |
-| **PC 트래커 진입점** | `antidrone/cpp/apps/ptcamera_tracker.cpp` | `main()` — 카메라·YOLO·ByteTrack·PID·시리얼·UDP 릴레이 |
-| **PC 트래커 구현부** | `antidrone/cpp/src/*.cpp` | control, detector, serial_port, tracking, pipeline, overlay, settings |
+| **PC 트래커 진입점** | `antidrone/cpp/apps/ptcamera_tracker.cpp` | `main()` — 카메라·YOLO·ByteTrack·bbox오차계산·시리얼·UDP 릴레이 |
+| **PC 트래커 구현부** | `antidrone/cpp/src/*.cpp` | detector, serial_port, tracking, pipeline, overlay, settings (control은 레거시) |
 | **PC 트래커 헤더** | `antidrone/cpp/include/ptcamera/*.hpp` | 타입 정의·인터페이스 (settings.hpp에 모든 기본값) |
 | **PL HLS IP 소스** | `Vitis/cordic_polar.cpp` | 극좌표 변환 IP — ps_main이 AXI 레지스터로 호출 |
 | **PL HLS IP 소스** | `Vitis/kalman_filter.cpp` | 칼만 필터 IP |
@@ -64,34 +64,31 @@ cd C:\Users\kimse\capstone\antidrone
 
 | 명령 | 형식 | 설명 |
 |---|---|---|
-| Pan 스텝 | `P:±N\n` | N=스텝 수. AI 추적 또는 수동 모드 Pan 이동 |
-| Tilt 스텝 | `T:±N\n` | N=스텝 수. **Pan 없이 단독 작동 가능** (FPGA `:790` `\|\|` 조건) |
-| 수동 모드 진입 | `M:1\n` | minStep 제한 해제 → 1스텝(0.088°) 정밀 이동. 캘리브레이션용 |
-| 수동 모드 해제 | `M:0\n` | 자동 추적 모드 복귀 |
+| **AI 추적** | `B:ex,ey\n` | bbox 중심 오차 (320×240 기준 스케일). FPGA가 PID→스텝 계산. |
+| 수동 Pan | `P:±N\n` | M:1 수동 모드 전용. 직접 스텝 이동. |
+| 수동 Tilt | `T:±N\n` | M:1 수동 모드 전용. 직접 스텝 이동. |
+| 수동 모드 진입 | `M:1\n` | minStep 제한 해제 → 캘리브레이션용 |
+| 수동 모드 해제 | `M:0\n` | AI 추적 모드 복귀 |
 
-> FPGA는 매 프레임(33ms) 끝에 `g_host_pan/tilt_steps`를 0으로 리셋 → AI 추적 시 30Hz 재전송 필요.
-> 수동 모드(`M:1`)에서는 명령 1회로 해당 스텝만 이동 후 정지(쿨다운 없음).
-
-**PC 측 각도→스텝 변환** (`control.hpp`): `STEPS_PER_DEGREE = 4096/360 ≈ 11.378`
-- `degreesToSteps(1.0)` → 11 스텝 (≈ 0.088°/스텝)
-- `sendPanDegrees(deg)` / `sendTiltDegrees(deg)` — SerialPort API
+> ex = `(cx - frame_w/2) / (frame_w/2) × 160`, ey = `(cy - frame_h/2) / (frame_h/2) × 120` (PC에서 계산, `serial_port.cpp:sendBBox()`).
+> FPGA는 매 프레임 끝에 `g_host_bbox_valid`를 false 리셋 → PC는 30Hz로 재전송 필요.
+> 수동 모드(`M:1`) 방향키: `sendPanDegrees()` / `sendTiltDegrees()` — `STEPS_PER_DEGREE = 4096/360 ≈ 11.378`.
 
 **FPGA → PC (UART0)**: `[RADAR] T0:(x,y)mm spd=Ncm/s | dist=Nmm ang=N.Ndeg` + `[UART]/[KALM]` 로그.
 
 **PC 내부 UDP (localhost)** — tracker → unified_gui:
 - `9998` 카메라 JPEG 640×360 · `9999` `[RADAR]` 텍스트 · `10000` JSON 텔레메트리(FPS/AI/Motor/Serial)
 
-## FPGA 모터 상태머신 (`ps_main.cpp:788~811`)
+## FPGA 모터 상태머신
 
-우선순위 분기. **Pan은 항상 레이더 방위각, 증분 PID**(절대 SET 아님). Tilt는 PC `T:` 명령 전용.
-MTI(온보드 퓨전)는 레거시 분리됨 → 퓨전 분기 없음. 영상 탐지는 PC YOLO 전담.
+우선순위 분기. **PID 계산(Pan+Tilt 모두) FPGA 전담**. PC는 bbox 오차만 전송.
 
 | 모드 | 조건 | Pan | Tilt |
 |---|---|---|---|
-| AI 추적 | `(pan\|\|tilt steps) != 0 && cooldown==0` | PC `P:` 직접 | PC `T:` 직접 |
-| 수동 | `M:1` + `P:/T:` | PC `P:` (minStep 없음) | PC `T:` (minStep 없음) |
+| **AI 추적** | `bbox_valid && cooldown==0` | bbox ex → `motor_pid_step()` | bbox ey → `motor_pid_step()` |
+| **수동** | `M:1` + `P:/T:` + `cooldown==0` | `P:` 직접 스텝 (minStep 없음) | `T:` 직접 스텝 |
 | AI 잠금 | `cooldown>0` or `ai_lock_frames>0` | 위치 유지(레이더 차단) | 유지 |
-| 레이더 단독 | `rvc>0` | 레이더 `angle_to_px(rang)` PID | PC `T:` 직접 |
+| 레이더 단독 | `rvc>0` (AI 잠금 해제 후) | 레이더 `angle_to_px(rang)` PID | 정지 |
 | 표적 없음 | `rvc==0` | 마지막 위치 유지 | — |
 
 - 레이더 `rang`은 LP필터(α=0.4, `:767`)로 평활 후 PID 입력 → 좌우 지터 억제.

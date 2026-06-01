@@ -38,11 +38,7 @@ public:
     bool sendTiltDegrees(double degrees, std::string* error = nullptr);
 
 private:
-#ifdef _WIN32
     void* handle_ = reinterpret_cast<void*>(-1);  // HANDLE; windows.h 없이 저장
-#else
-    int fd_ = -1;
-#endif
 };
 
 }  // namespace ptcamera

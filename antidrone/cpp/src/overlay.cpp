@@ -84,11 +84,11 @@ void drawOverlay(
             125,
             cv::Scalar(255, 255, 0));
     putLine(frame, "DETECTIONS " + std::to_string(detectionCount), 155, cv::Scalar(0, 200, 255));
-    putLine(frame, "FPS " + formatDouble(fps, 1), 245, cv::Scalar(255, 255, 255), 0.6);
-    putLine(frame, motorEnabled ? "MOTOR ON" : "MOTOR OFF", 275, motorEnabled ? cv::Scalar(80, 255, 80)
+    putLine(frame, "FPS " + formatDouble(fps, 1), 185, cv::Scalar(255, 255, 255), 0.6);
+    putLine(frame, motorEnabled ? "MOTOR ON" : "MOTOR OFF", 215, motorEnabled ? cv::Scalar(80, 255, 80)
                                                                                : cv::Scalar(180, 180, 180));
 
-    int y = 305;
+    int y = 245;
     for (const auto& line : statusLines) {
         putLine(frame, line, y, cv::Scalar(255, 255, 255), 0.6);
         y += 28;
