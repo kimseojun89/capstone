@@ -11,6 +11,9 @@
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
 #  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX   // windows.h의 min/max 매크로가 std::min/std::max를 깨뜨리는 것 방지
+#  endif
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
 #else
@@ -62,7 +65,8 @@ void printUsage() {
     std::cout << "Usage: ptcamera_tracker [--model path_or_dir] [--device CPU] [--camera 0]\n"
                  "                        [--camera-width 1920] [--camera-height 1080]\n"
                  "                        [--serial-port COM3] [--baud 256000]\n"
-                 "                        [--enable-motor] [--conf 0.25] [--send-interval 0.12]\n";
+                 "                        [--enable-motor] [--conf 0.25] [--send-interval 0.12]\n"
+                 "                        [--manual-mode]\n";
 }
 
 bool ensureSerialOpen(ptcamera::SerialPort& serial, const ptcamera::TrackerSettings& settings) {
@@ -85,6 +89,7 @@ bool ensureSerialOpen(ptcamera::SerialPort& serial, const ptcamera::TrackerSetti
 int main(int argc, char** argv) {
     ptcamera::TrackerSettings settings = ptcamera::defaultSettings();
     bool motorEnabled = false;
+    bool manualMode = false;
 
     try {
         for (int i = 1; i < argc; ++i) {
@@ -113,6 +118,8 @@ int main(int argc, char** argv) {
                 settings.coilOrder = readIntArg(argc, argv, i);
             } else if (arg == "--enable-motor") {
                 motorEnabled = true;
+            } else if (arg == "--manual-mode") {
+                manualMode = true;
             } else if (arg == "--help") {
                 printUsage();
                 return 0;
@@ -188,6 +195,7 @@ int main(int argc, char** argv) {
         std::cout << "Inference device: " << settings.inferenceDevice << '\n';
         std::cout << "Camera index: " << settings.cameraIndex << '\n';
         std::cout << "Motor: " << (motorEnabled ? "enabled" : "disabled") << " (space toggles)\n";
+        std::cout << "Manual: " << (manualMode ? "enabled" : "disabled") << " (m toggles, arrows move 1 deg)\n";
         std::cout << "Radar relay: UDP 127.0.0.1:9999\n";
 
         cv::namedWindow("ptcamera_tracker", cv::WINDOW_NORMAL);
@@ -327,8 +335,8 @@ int main(int argc, char** argv) {
                 }
             }
 
-            const int key = cv::waitKey(1) & 0xff;
-            if (key == 27 || key == 'q') {
+            const int key = cv::waitKeyEx(1);
+            if (key == 27 || key == 'q' || key == 'Q') {
                 break;
             }
             if (key == ' ') {
@@ -338,6 +346,36 @@ int main(int argc, char** argv) {
                     motorEnabled = ensureSerialOpen(serial, settings);
                 }
                 std::cout << "Motor " << (motorEnabled ? "enabled" : "disabled") << '\n';
+            }
+            if (key == 'm' || key == 'M') {
+                manualMode = !manualMode;
+                if (serial.isOpen()) {
+                    serial.sendManualMode(manualMode);
+                }
+                if (manualMode) {
+                    motorEnabled = false;
+                    control.reset();
+                }
+                std::cout << "Manual mode " << (manualMode ? "ON (arrows: 1deg, shift+arrows: 0.1deg)" : "OFF") << '\n';
+            }
+            // 수동 모드 방향키 조작
+            if (manualMode && serial.isOpen()) {
+                constexpr double DEG_NORMAL = 1.0;
+                constexpr double DEG_FINE   = 0.1;
+                // OpenCV arrow key codes on Windows
+                if (key == 2424832) {  // Left
+                    serial.sendPanDegrees(-DEG_NORMAL);
+                    std::cout << "Manual: pan -1 deg\n";
+                } else if (key == 2555904) {  // Right
+                    serial.sendPanDegrees(+DEG_NORMAL);
+                    std::cout << "Manual: pan +1 deg\n";
+                } else if (key == 2490368) {  // Up
+                    serial.sendTiltDegrees(+DEG_NORMAL);
+                    std::cout << "Manual: tilt +1 deg\n";
+                } else if (key == 2621440) {  // Down
+                    serial.sendTiltDegrees(-DEG_NORMAL);
+                    std::cout << "Manual: tilt -1 deg\n";
+                }
             }
         }
 

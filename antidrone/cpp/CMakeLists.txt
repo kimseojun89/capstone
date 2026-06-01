@@ -70,7 +70,6 @@ function(add_ptcamera_app target source)
 endfunction()
 
 add_ptcamera_app(camera_smoke_test    apps/camera_smoke_test.cpp)
-add_ptcamera_app(serial_stepper_test  apps/serial_stepper_test.cpp)
 add_ptcamera_app(detector_viewer      apps/detector_viewer.cpp)
 add_ptcamera_app(tracking_viewer      apps/tracking_viewer.cpp)
 add_ptcamera_app(ptcamera_tracker     apps/ptcamera_tracker.cpp)

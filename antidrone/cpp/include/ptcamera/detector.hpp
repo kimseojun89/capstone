@@ -34,7 +34,6 @@ private:
     };
 
     cv::Mat letterbox(const cv::Mat& frameBgr, LetterboxInfo& info) const;
-    std::vector<float> makeInputData(const cv::Mat& letterboxedBgr) const;
     std::vector<Detection> postprocess(
         const float* data,
         const std::vector<int64_t>& shape,

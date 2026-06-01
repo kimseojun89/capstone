@@ -26,14 +26,13 @@ public:
     bool writeLine(const std::string& line, std::string* error = nullptr);
     bool readLine(std::string& line, int timeoutMs, std::string* error = nullptr);
     bool readAvailable(std::string& buf);  // non-blocking drain of RX buffer
-    bool sendStepperCommand(
-        const ControlCommand& command,
-        int stepDelayUs,
-        int coilOrder,
-        std::string* error = nullptr);
 
     bool sendTiltCommand(int tiltSteps, std::string* error = nullptr);
     bool sendPanCommand(int panSteps,   std::string* error = nullptr);
+
+    bool sendManualMode(bool enable, std::string* error = nullptr);
+    bool sendPanDegrees(double degrees, std::string* error = nullptr);
+    bool sendTiltDegrees(double degrees, std::string* error = nullptr);
 
 private:
 #ifdef _WIN32

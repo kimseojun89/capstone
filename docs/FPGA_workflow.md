@@ -19,7 +19,7 @@
 | `cordic_prj` | `cordic_polar` | AXI4-Lite | CORDIC 극좌표 변환 |
 | `kalman_prj` | `kalman_filter` | AXI4-Lite | 칼만 필터 |
 | `motor_prj` | `uln2003_controller` | AXI4-Lite (제어) + ap_none (GPIO) | 28BYJ-48 듀얼 스테퍼 모터 |
-| `mti_process_prj` | `mti_process` | AXI4-Lite (제어) + AXI Master (DDR) | MTI 영상 처리 + BBox 추출 |
+| ~~`mti_process_prj`~~ | `mti_process` | AXI4-Lite + AXI Master | **레거시** (SW 미사용, PL 잔존) — [legacy/mti_subsystem](../legacy/mti_subsystem/) |
 
 ---
 
@@ -95,7 +95,7 @@ Kalman HLS IP 내부 `DT = 0.1f` (10Hz 기준)이나, 현재 메인 루프는 `u
 
 - `motor_pid_step()` — C++ AxisController + PIDController 이식 (단일 축 PID + 슬루 리미팅 + 최소 스텝 보정)
 - `motor_update(err_x, err_y)` — AP_IDLE 확인 후 target_pan/tilt 레지스터 기록 및 AP_START
-- 메인 루프 스텝 5 — 퓨전 매칭 시 BBox 중심 기준, 미매칭 시 레이더 방위각 기준으로 Pan 보정
+- 메인 루프 모터 제어 — 레이더 방위각(`angle_to_px(rang)`) 기준 Pan 증분 PID (퓨전은 레거시화로 제거)
 
 **Motor IP 주소:** `XPAR_ULN2003_CONTROLLER_0_BASEADDR = 0x40030000` (xparameters.h 확인)
 
@@ -121,21 +121,17 @@ pan/tilt GPIO가 명시적으로 할당되어 있는지 점검.
 
 ---
 
-### 4. USE_MOCK_MTI = 1 상태 (실제 카메라 미연결)
+### 4. ✅ MTI — 레거시화 (2026-06-01)
 
-`ps_main.cpp` 상단:
-```cpp
-#define USE_MOCK_MTI  1  // 현재 Mock 프레임 사용 중
-```
-실제 카메라 입력이 없으면 MTI 정밀도 검증이 불가하다.
-카메라 프레임을 DDR `CURR_BUF`에 쓰는 방식(DMA 또는 PS 직접 쓰기)이 확정되어야 `0`으로 전환 가능하다.
+MTI(온보드 영상 모션 감지)는 `ps_main.cpp`에서 제거되어 [legacy/mti_subsystem/](../legacy/mti_subsystem/)로 분리.
+영상 탐지는 PC YOLO(`ptcamera_tracker.exe`)가 담당하므로 온보드 MTI/Mock 프레임 불필요.
+Vivado 블록디자인의 IP는 PL에 잔존(미사용). 부활법은 해당 폴더 README.
 
 ---
 
-### 5. MTI IP DDR 접근 방식 — 보류
+### 5. ✅ MTI IP DDR 접근 방식 — 무의미화 (레거시화)
 
-MTI 파트는 추후 진행 예정이므로 현재 검토 제외.
-현재 `USE_MOCK_MTI = 1` 상태로 MTI 관련 코드는 유지되어 있으며 실제 IP 호출은 발생하지 않는다.
+MTI 레거시화로 DDR 접근(DMA vs PS 쓰기) 결정 불필요. 부활 시 재검토 ([legacy/mti_subsystem](../legacy/mti_subsystem/)).
 
 ---
 
@@ -201,14 +197,9 @@ HLS 코드를 수정할 때마다 아래 전체 흐름을 반복해야 한다.
 
 ---
 
-### 10. MTI 폴링 루프가 메인 루프를 블로킹함
+### 10. ✅ MTI 폴링 블로킹 — 해소 (레거시화)
 
-```cpp
-while(!(MTI_RD(MTI_CTRL_OFF) & AP_DONE)) { ... }  // 동기 폴링
-```
-MTI IP 처리 중에는 UART 수신도 멈춘다.
-레이더 샘플링 속도가 빠를 경우 링 버퍼 오버플로우 가능성이 있다.
-인터럽트 기반(`ap_ctrl_hs` IRQ → GIC 등록)으로 전환하거나, MTI 처리 전후 UART flush를 추가하는 것을 고려해야 한다.
+MTI 제거로 동기 폴링(`while(...AP_DONE...)`) 자체가 사라짐 → UART 수신 정지/링버퍼 오버플로 위험 제거.
 
 ---
 
@@ -219,4 +210,4 @@ MTI IP 처리 중에는 UART 수신도 멈춘다.
 | UART1 TX/RX | EMIO → PMODA | 레이더 / 호스트 통신 (256000 bps) |
 | pan_out[3:0] | 미확인 (XDC 필요) | ULN2003 Pan 모터 IN1~IN4 |
 | tilt_out[3:0] | 미확인 (XDC 필요) | ULN2003 Tilt 모터 IN1~IN4 |
-| Camera 입력 | 미연결 (Mock 상태) | CURR_BUF DMA 경로 미결정 |
+| Camera 입력 | — (MTI 레거시화) | 영상 탐지는 PC YOLO 담당 |

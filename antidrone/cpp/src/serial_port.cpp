@@ -6,6 +6,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <cmath>
 #include <sstream>
 #include <cstring>
 
@@ -125,17 +126,6 @@ bool SerialPort::readLine(std::string& line, int timeoutMs, std::string* error) 
     return !line.empty();
 }
 
-bool SerialPort::sendStepperCommand(
-    const ControlCommand& command,
-    int stepDelayUs,
-    int coilOrder,
-    std::string* error) {
-    std::ostringstream ss;
-    ss << command.panSteps << ',' << command.tiltSteps << ','
-       << stepDelayUs << ',' << coilOrder << '\n';
-    return writeLine(ss.str(), error);
-}
-
 bool SerialPort::sendTiltCommand(int tiltSteps, std::string* error) {
     std::ostringstream ss;
     ss << "T:" << tiltSteps << '\n';
@@ -146,6 +136,20 @@ bool SerialPort::sendPanCommand(int panSteps, std::string* error) {
     std::ostringstream ss;
     ss << "P:" << panSteps << '\n';
     return writeLine(ss.str(), error);
+}
+
+bool SerialPort::sendManualMode(bool enable, std::string* error) {
+    return writeLine(enable ? "M:1\n" : "M:0\n", error);
+}
+
+bool SerialPort::sendPanDegrees(double degrees, std::string* error) {
+    int steps = static_cast<int>(std::round(degrees * 4096.0 / 360.0));
+    return sendPanCommand(steps, error);
+}
+
+bool SerialPort::sendTiltDegrees(double degrees, std::string* error) {
+    int steps = static_cast<int>(std::round(degrees * 4096.0 / 360.0));
+    return sendTiltCommand(steps, error);
 }
 
 bool SerialPort::readAvailable(std::string& buf) {
@@ -169,6 +173,7 @@ bool SerialPort::readAvailable(std::string& buf) {
 #include <unistd.h>
 
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <sstream>
 
@@ -342,16 +347,6 @@ bool SerialPort::readLine(std::string& line, int timeoutMs, std::string* error) 
     return !line.empty();
 }
 
-bool SerialPort::sendStepperCommand(
-    const ControlCommand& command,
-    int stepDelayUs,
-    int coilOrder,
-    std::string* error) {
-    std::ostringstream line;
-    line << command.panSteps << ',' << command.tiltSteps << ',' << stepDelayUs << ',' << coilOrder << '\n';
-    return writeLine(line.str(), error);
-}
-
 bool SerialPort::sendTiltCommand(int tiltSteps, std::string* error) {
     std::ostringstream ss;
     ss << "T:" << tiltSteps << '\n';
@@ -362,6 +357,20 @@ bool SerialPort::sendPanCommand(int panSteps, std::string* error) {
     std::ostringstream ss;
     ss << "P:" << panSteps << '\n';
     return writeLine(ss.str(), error);
+}
+
+bool SerialPort::sendManualMode(bool enable, std::string* error) {
+    return writeLine(enable ? "M:1\n" : "M:0\n", error);
+}
+
+bool SerialPort::sendPanDegrees(double degrees, std::string* error) {
+    int steps = static_cast<int>(std::round(degrees * 4096.0 / 360.0));
+    return sendPanCommand(steps, error);
+}
+
+bool SerialPort::sendTiltDegrees(double degrees, std::string* error) {
+    int steps = static_cast<int>(std::round(degrees * 4096.0 / 360.0));
+    return sendTiltCommand(steps, error);
 }
 
 bool SerialPort::readAvailable(std::string& buf) {

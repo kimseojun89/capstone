@@ -5,6 +5,8 @@
 
 | 항목 | 격리 사유 | 대체/현재 |
 |---|---|---|
+| `mti_subsystem/` | FPGA 온보드 MTI 영상감지. PC YOLO와 중복·Mock 상태(죽은 코드). | PC `ptcamera_tracker.exe` YOLO |
+| `serial_stepper_test.cpp` | 구 Arduino 4필드 CSV(`pan,tilt,delay,coil`) 시리얼 테스트. FPGA가 더 이상 미파싱. | `P:`/`T:` 프로토콜 |
 | `ppi_viewer.py` | 레이더 PPI 단독 뷰어. 통합 GUI로 대체된 백업. | `antidrone/unified_gui.py` |
 | `ppi_original.py` | PPI 뷰어 초기 버전. 어디서도 참조 안 됨. | `antidrone/unified_gui.py` |
 | `run_ppi_viewer.bat` | `ppi_viewer.py` 실행 배치. 위와 함께 격리. | `antidrone/run_system.ps1` |

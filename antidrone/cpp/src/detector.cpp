@@ -132,15 +132,20 @@ std::vector<Detection> YoloDetector::detect(const cv::Mat& frameBgr) {
 
     LetterboxInfo info;
     const cv::Mat letterboxed = letterbox(frameBgr, info);
-    const std::vector<float> inputData = makeInputData(letterboxed);
 
     const int size = settings_.inputSize;
+    // letterbox된 정사각 영상 → NCHW float32 blob (BGR→RGB, /255 정규화).
+    // OpenCV가 SIMD 최적화로 처리 (구 수동 픽셀 루프 makeInputData 대체).
+    const cv::Mat blob = cv::dnn::blobFromImage(
+        letterboxed, 1.0 / 255.0, cv::Size(size, size), cv::Scalar(),
+        /*swapRB=*/true, /*crop=*/false, CV_32F);
+
     std::array<int64_t, 4> inputShape{1, 3, size, size};
     Ort::MemoryInfo memInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     Ort::Value inputTensor = Ort::Value::CreateTensor<float>(
         memInfo,
-        const_cast<float*>(inputData.data()),
-        inputData.size(),
+        const_cast<float*>(blob.ptr<float>()),
+        static_cast<size_t>(blob.total()),
         inputShape.data(),
         inputShape.size());
 
@@ -183,32 +188,6 @@ cv::Mat YoloDetector::letterbox(const cv::Mat& frameBgr, LetterboxInfo& info) co
         info.padX, size - resizedWidth  - info.padX,
         cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));
     return output;
-}
-
-// ---------------------------------------------------------------------------
-// makeInputData  (BGR → RGB → CHW float32 normalized)
-// ---------------------------------------------------------------------------
-std::vector<float> YoloDetector::makeInputData(const cv::Mat& letterboxedBgr) const {
-    cv::Mat rgb;
-    cv::cvtColor(letterboxedBgr, rgb, cv::COLOR_BGR2RGB);
-
-    const int height = rgb.rows;
-    const int width  = rgb.cols;
-    const size_t planeSize = static_cast<size_t>(height) * static_cast<size_t>(width);
-    std::vector<float> data(3 * planeSize);
-
-    for (int y = 0; y < height; ++y) {
-        const auto* row = rgb.ptr<cv::Vec3b>(y);
-        for (int x = 0; x < width; ++x) {
-            const cv::Vec3b pixel = row[x];
-            const size_t offset = static_cast<size_t>(y) * static_cast<size_t>(width) +
-                                  static_cast<size_t>(x);
-            data[offset]              = static_cast<float>(pixel[0]) / 255.0F;
-            data[planeSize + offset]  = static_cast<float>(pixel[1]) / 255.0F;
-            data[planeSize*2 + offset]= static_cast<float>(pixel[2]) / 255.0F;
-        }
-    }
-    return data;
 }
 
 // ---------------------------------------------------------------------------

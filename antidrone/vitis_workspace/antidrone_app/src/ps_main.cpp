@@ -27,20 +27,15 @@
 // ============================================================
 //  컴파일 타임 설정
 // ============================================================
-#define USE_MOCK_MTI        1       // 1 = Mock 프레임, 0 = 실제 MTI IP
-#define DISABLE_MTI         1       // 1 = MTI IP 완전 비활성 (레이더 전용 모드, UART 블로킹 제거)
 #define USE_HLS_CORDIC      1       // 1 = PL CORDIC IP,  0 = ARM 소프트웨어
 #define USE_HLS_KALMAN      1       // 1 = PL Kalman IP,  0 = ARM 소프트웨어
-#define LOG_LEVEL           2       // 2 = 상세 로그, 1 = 요약 로그
-#define FUSE_THRESHOLD_PX   40      // 퓨전 픽셀 오차 허용치
+#define LOG_LEVEL           1       // 1 = 요약 로그, 2 = 상세 로그
 #define CAM_HFOV_DEG        60.0f
 #define CAM_W_PX            320
 #define CAM_H_PX            240
 #define RADAR_UART_BAUD     256000u
 #define CONSOLE_UART_BAUD   256000u  // 호스트 tilt 명령 채널 겸용
 #define RADAR_STALE_FRAMES  5
-#undef LOG_LEVEL
-#define LOG_LEVEL           1
 #define MAIN_LOOP_SLEEP_US  33000u  // 30Hz (복원: DT=0.033과 일치)
 #define RADAR_LOG_PERIOD_FRAMES  1
 
@@ -55,34 +50,13 @@
 #endif
 
 // ============================================================
-//  MTI IP 레지스터 맵
+//  HLS IP 공통 ap_ctrl 비트 (CORDIC/Kalman/Motor 공용)
+//  ※ MTI 서브시스템은 legacy/mti_subsystem/ 로 분리됨 (2026-06-01)
 // ============================================================
-#ifndef XPAR_MTI_PROCESS_0_BASEADDR
-    #define MTI_BASEADDR  0x40020000
-#else
-    #define MTI_BASEADDR  XPAR_MTI_PROCESS_0_BASEADDR
-#endif
-
-#define MTI_CTRL_OFF    0x00
-#define MTI_PF1_OFF     0x10
-#define MTI_PF2_OFF     0x14   
-#define MTI_CF1_OFF     0x1C
-#define MTI_CF2_OFF     0x20
-#define MTI_W_OFF       0x28
-#define MTI_H_OFF       0x30
-#define MTI_P1_OFF      0x38
-#define MTI_P2_OFF      0x3C   
-#define MTI_ROI1_OFF    0x44
-#define MTI_ROI2_OFF    0x48
-#define MTI_CNT1_OFF    0x50
-#define MTI_CNT2_OFF    0x54
 
 #define AP_START  (1u << 0)
 #define AP_DONE   (1u << 1)
 #define AP_IDLE   (1u << 2)
-
-#define MTI_WR(off, v)  Xil_Out32(MTI_BASEADDR + (off), (u32)(v))
-#define MTI_RD(off)     Xil_In32 (MTI_BASEADDR + (off))
 
 // ============================================================
 //  ULN2003 모터 컨트롤러 IP 레지스터 맵
@@ -118,16 +92,13 @@
 //     150 =   0.42ms/step → 탈조 위험
 // 탈조 시 → SPEED_DELAY=300, MAX_STEP=38 으로 되돌릴 것
 #define MOTOR_SPEED_DELAY   200
-#define MOTOR_ACQUIRE_RAMP  0.6f    // 첫 표적 획득 시 가속 억제 (control.cpp acquireRampScale)
+#define MOTOR_ACQUIRE_RAMP  1.0f    // 첫 표적 획득 가속비 (1.0=억제 없음; control.cpp acquireRampScale)
 #define MOTOR_DT            0.033f  // 30fps 기준 루프 주기
 
 // ============================================================
 //  CORDIC Polar IP (AXI4-Lite, 0x40000000)
 //  cordic_polar.cpp 동일 알고리즘 — 출력 단위: 0.1도
 // ============================================================
-#undef MOTOR_ACQUIRE_RAMP
-#define MOTOR_ACQUIRE_RAMP  1.0f
-
 #ifndef XPAR_CORDIC_POLAR_0_BASEADDR
     #define CORDIC_BASEADDR  0x40000000
 #else
@@ -158,21 +129,12 @@
 // states_out: 0x80~0xDF (3×5×32-bit, 32byte/state, 5 words used + 3 reserved)
 //   per state n at 0x80+32n: [x(f32), y(f32), vx(f32), vy(f32), init(u32 bit0)]
 
-// DDR 버퍼 영역
-#define PREV_BUF   0x00500000u
-#define CURR_BUF   0x00520000u
-#define ROI_BUF    0x00540000u
-#define CNT_BUF    0x00540400u
-
-#define MAX_ROIS     8
 #define MAX_TARGETS  3
 
 // ============================================================
 //  자료형
 // ============================================================
 
-typedef struct __attribute__((packed)) { uint16_t x,y,w,h; uint32_t area; float score; } BBox_t;
-typedef struct __attribute__((packed)) { uint8_t dthr,blur; uint16_t mba,pad; } MtiParams_t;
 typedef struct __attribute__((packed)) { int16_t x,y,speed; bool valid; } RadarTarget_t;
 typedef struct __attribute__((packed)) { float x,y,vx,vy; bool init; } KalmanState_t;
 
@@ -240,6 +202,7 @@ static uint32_t g_host_head = 0;
 static uint32_t g_host_tail = 0;
 static int      g_host_tilt_steps = 0;  // 최신 수신 tilt 스텝 (매 Step5 소비 후 0 리셋)
 static int      g_host_pan_steps  = 0;  // 최신 수신 pan 스텝  (AI 트래킹 모드 활성화 신호)
+static bool     g_manual_mode     = false;  // 수동 모드: minStep 제한 해제 (캘리브레이션용)
 
 static void host_ring_push(uint8_t b)
 {
@@ -277,7 +240,7 @@ static void host_parse_commands(void)
         if (len < 3 || len > 24) { g_host_tail = nl_pos + 1; continue; }
 
         uint8_t cmd = host_ring_at(g_host_tail);
-        if ((cmd == 'T' || cmd == 'P') &&
+        if ((cmd == 'T' || cmd == 'P' || cmd == 'M') &&
              host_ring_at(g_host_tail + 1) == ':') {
             int val = 0, sign = 1;
             uint32_t p = g_host_tail + 2;
@@ -290,8 +253,9 @@ static void host_parse_commands(void)
                 else { ok = false; break; }
             }
             if (ok) {
-                if (cmd == 'T') g_host_tilt_steps = sign * val;
-                else             g_host_pan_steps  = sign * val;
+                if (cmd == 'T')      g_host_tilt_steps = sign * val;
+                else if (cmd == 'P') g_host_pan_steps  = sign * val;
+                else if (cmd == 'M') g_manual_mode     = (val != 0);
             }
         }
         g_host_tail = nl_pos + 1;
@@ -594,12 +558,12 @@ static int   g_motor_abs_pan  = 0;   // IP의 static current_pan 기준 누적 �
 static int   g_motor_abs_tilt = 0;
 static bool  g_had_target     = false; // 직전 프레임 표적 유무 (acquireRampScale 판별)
 static int   g_host_cmd_cooldown = 0; // 명령 실행 보호 (IP 이동 완료 대기)
-static int   g_ai_lock_frames    = 0; // AI 추적 모드 유지 — 레이더/퓨전 오버라이드 차단
+static int   g_ai_lock_frames    = 0; // AI 추적 모드 유지 — 레이더 오버라이드 차단
 #define HOST_CMD_COOLDOWN_FRAMES  2   // 2프레임(66ms): 모터 이동 완료 대기
 #define AI_LOCK_FRAMES            4   // 4프레임(132ms): C++ 다음 명령 도착 전까지 레이더 개입 방지
 
 // ============================================================
-//  센서 퓨전 매칭
+//  레이더 방위각 → 픽셀 변환 (angle_to_px)
 // ============================================================
 static int angle_to_px(int16_t at_10)
 {
@@ -610,18 +574,6 @@ static int angle_to_px(int16_t at_10)
     if(px < 0) px = 0; 
     if(px >= CAM_W_PX) px = CAM_W_PX - 1;
     return px;
-}
-
-static int fuse(const BBox_t* bb, int n, int16_t at_10, int thr)
-{
-    if(n<=0) return -1;
-    int rpx = angle_to_px(at_10);
-    int best = -1, bd = thr + 1;
-    for(int i=0;i<n;++i){
-        int d = abs(bb[i].x + bb[i].w/2 - rpx);
-        if(d < bd){bd=d;best=i;}
-    }
-    return best;
 }
 
 // ============================================================
@@ -676,39 +628,6 @@ static int motor_pid_step(
     return cmd > 0.0f ? step : -step;
 }
 
-// has_target: 카메라 또는 레이더 표적 존재 여부
-// Arduino 시리얼 대신 ULN2003 HLS IP AXI 레지스터에 절대 목표 기록
-static void motor_update(int err_x, int err_y, bool has_target)
-{
-    // 첫 표적 획득 프레임은 느리게 가속 (control.cpp acquireRampScale)
-    float ramp_scale = (has_target && !g_had_target) ? MOTOR_ACQUIRE_RAMP : 1.0f;
-    g_had_target = has_target;
-
-    int dpan  = motor_pid_step((float)err_x, (float)(CAM_W_PX / 2),
-                               MOTOR_PAN_DEADBAND, MOTOR_KP, MOTOR_KD,
-                               MOTOR_PAN_MIN_STEP, MOTOR_PAN_MAX_STEP,
-                               &g_pan_prev_err, &g_pan_cmd, ramp_scale);
-    int dtilt = motor_pid_step((float)err_y, (float)(CAM_H_PX / 2),
-                               MOTOR_TILT_DEADBAND, MOTOR_KP, MOTOR_KD,
-                               MOTOR_TILT_MIN_STEP, MOTOR_TILT_MAX_STEP,
-                               &g_tilt_prev_err, &g_tilt_cmd, ramp_scale);
-
-    if (dpan == 0 && dtilt == 0) return;
-
-    // IP 실행 중이면 PID 상태(smooth_cmd)만 유지하고 누적하지 않음
-    // → IP가 끝날 때 최신 PID 출력 1프레임치만 적용 (오버슈트 방지)
-    if (!(MOTOR_RD(0x00) & AP_IDLE)) return;
-
-    // HLS IP는 절대 위치로 동작 (static current_pan/tilt 내부 유지)
-    g_motor_abs_pan  += dpan;
-    g_motor_abs_tilt += dtilt;
-
-    MOTOR_WR(0x10, (u32)g_motor_abs_pan);
-    MOTOR_WR(0x18, (u32)g_motor_abs_tilt);
-    MOTOR_WR(0x20, MOTOR_SPEED_DELAY);
-    MOTOR_WR(0x00, AP_START);
-}
-
 // ============================================================
 //  하이브리드 모터 제어
 //    Pan  : 레이더 방위각 오차 → 기존 PID 경로
@@ -759,14 +678,20 @@ static void motor_update_full_host(int direct_pan_steps, int direct_tilt_steps)
     g_had_target = true;
 
     int dpan = direct_pan_steps;
+    int dtilt = direct_tilt_steps;
+
+    // maxStep 클램프 (자동/수동 공통)
     if (dpan >  MOTOR_PAN_MAX_STEP)  dpan =  MOTOR_PAN_MAX_STEP;
     if (dpan < -MOTOR_PAN_MAX_STEP)  dpan = -MOTOR_PAN_MAX_STEP;
-    if (abs(dpan) < MOTOR_PAN_MIN_STEP) dpan = 0;
-
-    int dtilt = direct_tilt_steps;
     if (dtilt >  MOTOR_TILT_MAX_STEP)  dtilt =  MOTOR_TILT_MAX_STEP;
     if (dtilt < -MOTOR_TILT_MAX_STEP)  dtilt = -MOTOR_TILT_MAX_STEP;
-    if (abs(dtilt) < MOTOR_TILT_MIN_STEP) dtilt = 0;
+
+    if (!g_manual_mode) {
+        // 자동 모드: minStep 미만 명령 무시 (미세 진동 방지)
+        if (abs(dpan) < MOTOR_PAN_MIN_STEP) dpan = 0;
+        if (abs(dtilt) < MOTOR_TILT_MIN_STEP) dtilt = 0;
+    }
+    // 수동 모드: minStep 제한 없음 → 1스텝(0.011°)부터 정밀 이동 가능
 
     // 모드 전환 시 PID 글리치 방지
     g_pan_prev_err  = 0.0f; g_pan_cmd  = 0.0f;
@@ -787,69 +712,9 @@ static void motor_update_full_host(int direct_pan_steps, int direct_tilt_steps)
 }
 
 // ============================================================
-//  MTI IP 초기화 및 실행
+//  MTI(영상 모션 감지) 서브시스템 제거됨 → legacy/mti_subsystem/ (2026-06-01)
+//  사유: PC YOLO 경로와 중복, Mock 상태(죽은 코드). 부활법은 해당 폴더 README 참조.
 // ============================================================
-static void mti_init(void)
-{
-    MtiParams_t p={25,1,200,10};
-    uint32_t p1=0,p2=0;
-    memcpy(&p1,&p,4); memcpy(&p2,(uint8_t*)&p+4,2);
-    MTI_WR(MTI_W_OFF,  CAM_W_PX); MTI_WR(MTI_H_OFF,  CAM_H_PX);
-    MTI_WR(MTI_P1_OFF, p1);       MTI_WR(MTI_P2_OFF, p2);
-    MTI_WR(MTI_PF1_OFF,PREV_BUF); MTI_WR(MTI_PF2_OFF,0);
-    MTI_WR(MTI_CF1_OFF,CURR_BUF); MTI_WR(MTI_CF2_OFF,0);
-    MTI_WR(MTI_ROI1_OFF,ROI_BUF); MTI_WR(MTI_ROI2_OFF,0);
-    MTI_WR(MTI_CNT1_OFF,CNT_BUF); MTI_WR(MTI_CNT2_OFF,0);
-}
-
-static void mock_frame(int cx, int cy, int r)
-{
-    uint8_t* pv=(uint8_t*)PREV_BUF;
-    uint8_t* cu=(uint8_t*)CURR_BUF;
-    for(int i=0;i<CAM_W_PX*CAM_H_PX;++i){
-        pv[i]=(uint8_t)(100+(i*7+13)%30);
-        cu[i]=(uint8_t)(100+(i*7+17)%30);
-    }
-    for(int row=0;row<CAM_H_PX;++row)
-        for(int col=0;col<CAM_W_PX;++col){
-            int dx=col-cx,dy=row-cy;
-            if(dx*dx+dy*dy<=r*r) cu[row*CAM_W_PX+col]=200;
-        }
-}
-
-static int mti_run(BBox_t* out)
-{
-#if DISABLE_MTI
-    (void)out;
-    return 0;
-#else
-
-#if USE_MOCK_MTI
-    static int mcx=160;
-    mcx=(mcx+1)%CAM_W_PX;
-    mock_frame(mcx, 120, 15);
-#endif
-
-    Xil_DCacheFlushRange(PREV_BUF, CAM_W_PX*CAM_H_PX);
-    Xil_DCacheFlushRange(CURR_BUF, CAM_W_PX*CAM_H_PX);
-    MTI_WR(MTI_CTRL_OFF, AP_START);
-
-    uint32_t to=10000000;
-    while(!(MTI_RD(MTI_CTRL_OFF)&AP_DONE)){
-        if ((to & 0x3FFu) == 0u) uart_accumulate();
-        if(--to==0){ xil_printf("[WARN] MTI timeout\n"); return 0; }
-    }
-
-    Xil_DCacheInvalidateRange(ROI_BUF, sizeof(BBox_t)*MAX_ROIS);
-    Xil_DCacheInvalidateRange(CNT_BUF, 4);
-
-    int cnt=*(volatile int*)CNT_BUF;
-    if(cnt<0||cnt>MAX_ROIS) cnt=0;
-    BBox_t* raw=(BBox_t*)ROI_BUF;
-    for(int i=0;i<cnt;++i) out[i]=raw[i];
-    return cnt;
-#endif
-}
 
 // ============================================================
 //  메인 루프
@@ -860,29 +725,13 @@ int main(void)
 
     xil_printf("\r\n============================================\r\n");
     xil_printf("  Anti-Drone Sensor Fusion Core Booting...\r\n");
-    xil_printf("  Phase 1: Zero-Latency & Sensor Fusion Mode\r\n");
-#if 0
-    xil_printf("  MTI  : %s\r\n", USE_MOCK_MTI?"Mock 프레임":"실제 카메라");
-#endif
+    xil_printf("  Phase 1: Zero-Latency Radar Tracking Mode\r\n");
     xil_printf("  Console: UART0 @ %u bps\r\n", (unsigned)CONSOLE_UART_BAUD);
     xil_printf("  Radar  : UART1 EMIO @ %u bps\r\n", (unsigned)RADAR_UART_BAUD);
-    xil_printf("  MTI    : %s\r\n", DISABLE_MTI ? "DISABLED (radar-only)" :
-                                    USE_MOCK_MTI ? "Mock frame" : "Real camera");
     xil_printf("============================================\r\n\r\n");
 
     if(uart_init()!=0) xil_printf("[-] Radar UART1 init failed; check xparameters.h\n");
     else xil_printf("[+] Radar UART1 OK (%u bps, EMIO PMODA)\n", (unsigned)RADAR_UART_BAUD);
-#if 0
-    if(uart_init()!=0) xil_printf("[-] UART1 실패 — xparameters.h 확인\n");
-    else xil_printf("[+] UART1 OK (256000bps, EMIO PMODA)\n");
-
-#endif
-#if !DISABLE_MTI
-    mti_init();
-    xil_printf("[+] MTI IP OK\n");
-#else
-    xil_printf("[~] MTI IP skipped (DISABLE_MTI=1)\n");
-#endif
 
 #if USE_HLS_KALMAN
     kalman_ip_reset();
@@ -896,7 +745,6 @@ int main(void)
     MOTOR_WR(0x00, AP_START);
     xil_printf("[+] Motor IP OK (home position)\n\n");
 
-    static BBox_t        bbox[MAX_ROIS];
     static RadarTarget_t rtgt[3];
     static KalmanState_t ks[MAX_TARGETS];
 
@@ -909,10 +757,7 @@ int main(void)
 
     while(true){
 
-        // 1. 카메라 영상 처리 (블로킹 포인트: 하드웨어 동기화)
-        int bc = mti_run(bbox);
-
-        // 2. 레이더 UART 고속 수신 및 파싱 (지연 제거 완벽 적용)
+        // 1. 레이더 UART 고속 수신 및 파싱 (지연 제거 완벽 적용)
         uart_accumulate();
         if(uart_parse(rtgt, &rvc)){
             radar_age = 0;
@@ -931,37 +776,30 @@ int main(void)
             memset(rtgt, 0, sizeof(rtgt));
         }
 
-        // 3. 칼만 필터 예측/보정
+        // 2. 칼만 필터 예측/보정
 #if USE_HLS_KALMAN
         kalman_ip_run(rtgt, ks);
 #else
         kalman_run(rtgt, ks);
 #endif
 
-        // 4. 센서 퓨전
-        int fi = fuse(bbox, bc, rang, FUSE_THRESHOLD_PX);
-
-        // 5. 모터 제어 (3-모드: AI추적 > 퓨전 > 레이더획득 > 정지)
+        // 3. 모터 제어 (AI추적 > 레이더 단독 > 정지)
         host_accumulate();
         host_parse_commands();
 
-        if (g_host_pan_steps != 0 && g_host_cmd_cooldown == 0) {
+        if ((g_host_pan_steps != 0 || g_host_tilt_steps != 0) && g_host_cmd_cooldown == 0) {
             // AI 트래킹 모드: PC YOLO가 Pan+Tilt 모두 제어
             motor_update_full_host(g_host_pan_steps, g_host_tilt_steps);
             g_host_cmd_cooldown = HOST_CMD_COOLDOWN_FRAMES;
             g_ai_lock_frames    = AI_LOCK_FRAMES;  // 레이더 오버라이드 차단 시작
         } else if (g_host_cmd_cooldown > 0) {
-            // 모터 이동 완료 대기 — 레이더/퓨전 개입 없음
+            // 모터 이동 완료 대기 — 레이더 개입 없음
             g_host_cmd_cooldown--;
             if (g_ai_lock_frames > 0) g_ai_lock_frames--;
         } else if (g_ai_lock_frames > 0) {
             // 쿨다운 끝, 아직 AI 잠금 중 — 모터 현재 위치 유지, 레이더 오버라이드 차단
             // C++ 다음 명령 도착 전 공백을 레이더가 채우지 못하게 막는 핵심 구간
             g_ai_lock_frames--;
-        } else if (fi >= 0) {
-            // 퓨전 모드: AI 잠금 완전 해제 후에만 진입
-            int cy = bbox[fi].y + bbox[fi].h / 2;
-            motor_update(angle_to_px(rang) - CAM_W_PX / 2, CAM_H_PX / 2 - cy, true);
         } else if (rvc > 0) {
             // 레이더 단독 모드: AI 잠금 완전 해제 후에만 진입
             motor_update_hybrid(angle_to_px(rang) - CAM_W_PX / 2, true, g_host_tilt_steps);
@@ -986,34 +824,7 @@ int main(void)
                        (unsigned)g_rx_bytes, (unsigned)g_rx_packets,
                        (unsigned)g_rx_ring_overflows, (unsigned)g_rx_hw_overruns,
                        (unsigned)g_rx_hw_errors);
-            /*
-            // 레이더 로그
-            if(rvc>0)
-                xil_printf("  [RADAR] T0:(%d,%d)mm spd=%dcm/s | dist=%dmm ang=%d.%ddeg\r\n",
-                           rtgt[0].x, rtgt[0].y, rtgt[0].speed, rdist, rang/10, abs(rang%10));
-            else
-                xil_printf("  [RADAR] 탐지없음\r\n");
-            */
             
-            // MTI 로그
-            xil_printf("  [MTI  ] ROI=%d%s\r\n", bc, USE_MOCK_MTI?" (Mock)":"");
-            for(int i=0;i<bc;++i)
-                xil_printf("    BBox[%d] x=%3d y=%3d w=%3d h=%3d\r\n",
-                           i,bbox[i].x,bbox[i].y,bbox[i].w,bbox[i].h);
-
-            // 퓨전 로그
-            if(rvc>0 && bc>0){
-                int rpx = angle_to_px(rang);
-                if(fi>=0){
-                    int cx = bbox[fi].x+bbox[fi].w/2;
-                    xil_printf("  [FUSE ] * BBox[%d] 매칭 (radar->px=%d, bbox_cx=%d, err=%dpx)\r\n",
-                               fi, rpx, cx, abs(cx-rpx));
-                } else {
-                    xil_printf("  [FUSE ] 미매칭 (radar->px=%d, 임계값=%dpx)\r\n",
-                               rpx, FUSE_THRESHOLD_PX);
-                }
-            }
-
             // 칼만 필터 로그
             for(int i=0;i<MAX_TARGETS;++i){
                 if(!ks[i].init) continue;
