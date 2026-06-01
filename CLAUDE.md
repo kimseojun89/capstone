@@ -94,7 +94,7 @@ cd C:\Users\kimse\capstone\antidrone
 - 레이더 `rang`은 LP필터(α=0.4, `:767`)로 평활 후 PID 입력 → 좌우 지터 억제.
 - AI 명령 후 `cooldown`/`ai_lock_frames` 동안 레이더 오버라이드 차단 → PC 추적 연속성 보장.
 - 수동 모드(`g_manual_mode`, `:205`)에서는 `motor_update_full_host`의 minStep 클램프 해제 (`:689`).
-- 상세/튜닝: [docs/motor_control_changes.md](docs/motor_control_changes.md), [docs/motor_porting_guide.md](docs/motor_porting_guide.md).
+- 상세/튜닝: [docs/motor_control.md](docs/motor_control.md).
 
 ## 주요 설정값 (코드 실측)
 
