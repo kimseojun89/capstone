@@ -1,13 +1,13 @@
 /**
  * ============================================================
  * ps_main.cpp  —  Anti-Drone Sensor Fusion Core
- * [Phase 1: Zero-Latency & Sensor Fusion 통합 완료 버전]
- * * 적용된 아키텍트 핵심 패치:
- * 1. UART 버퍼 루프 처리 (2초 지연 원천 차단)
- * 2. CORDIC 알고리즘(polar) 복원 및 부동소수점 오버헤드 제거
- * 3. 메인 루프 usleep 블로킹 제거
- * 4. 누락 없는 전체 서브시스템 로그 출력 복구
- * 5. Vitis 2023.2 SDT 대응 유연한 UART 초기화
+ * [Phase 2: FPGA-Only Control — AI 추론 제외 전부 FPGA 처리]
+ * 변경 이력:
+ * - SW CORDIC/Kalman 폴백 제거 (HLS IP 전용)
+ * - 프로토콜 P:/T: → B:ex,ey (bbox 픽셀 오차) 추가
+ *   PC는 bbox 중심 오차만 전송, PID 계산은 FPGA 전담
+ * - motor_update_ai_bbox(): 카메라 Pan+Tilt PID 신설
+ * - P:/T:는 수동 캘리브레이션 전용으로 유지
  * ============================================================
  */
 
@@ -27,8 +27,6 @@
 // ============================================================
 //  컴파일 타임 설정
 // ============================================================
-#define USE_HLS_CORDIC      1       // 1 = PL CORDIC IP,  0 = ARM 소프트웨어
-#define USE_HLS_KALMAN      1       // 1 = PL Kalman IP,  0 = ARM 소프트웨어
 #define LOG_LEVEL           1       // 1 = 요약 로그, 2 = 상세 로그
 #define CAM_HFOV_DEG        60.0f
 #define CAM_W_PX            320
@@ -200,8 +198,11 @@ static uint8_t ring_at(uint32_t i) { return g_ring[i % RING_SZ]; }
 static uint8_t  g_host_ring[HOST_RING_SZ];
 static uint32_t g_host_head = 0;
 static uint32_t g_host_tail = 0;
-static int      g_host_tilt_steps = 0;  // 최신 수신 tilt 스텝 (매 Step5 소비 후 0 리셋)
-static int      g_host_pan_steps  = 0;  // 최신 수신 pan 스텝  (AI 트래킹 모드 활성화 신호)
+static int      g_host_tilt_steps = 0;  // 수동 모드 tilt 직접 스텝 (M:1 전용)
+static int      g_host_pan_steps  = 0;  // 수동 모드 pan 직접 스텝
+static int      g_host_bbox_ex    = 0;  // AI 모드: bbox 중심 x 오차 (320px 기준 스케일)
+static int      g_host_bbox_ey    = 0;  // AI 모드: bbox 중심 y 오차 (240px 기준 스케일)
+static bool     g_host_bbox_valid = false;  // 이번 프레임 bbox 수신 여부
 static bool     g_manual_mode     = false;  // 수동 모드: minStep 제한 해제 (캘리브레이션용)
 
 static void host_ring_push(uint8_t b)
@@ -240,22 +241,53 @@ static void host_parse_commands(void)
         if (len < 3 || len > 24) { g_host_tail = nl_pos + 1; continue; }
 
         uint8_t cmd = host_ring_at(g_host_tail);
-        if ((cmd == 'T' || cmd == 'P' || cmd == 'M') &&
+        if ((cmd == 'T' || cmd == 'P' || cmd == 'M' || cmd == 'B') &&
              host_ring_at(g_host_tail + 1) == ':') {
-            int val = 0, sign = 1;
-            uint32_t p = g_host_tail + 2;
-            if ((int32_t)(nl_pos - p) > 0 && host_ring_at(p) == '-') { sign = -1; p++; }
-            else if ((int32_t)(nl_pos - p) > 0 && host_ring_at(p) == '+') { p++; }
-            bool ok = false;
-            while ((int32_t)(nl_pos - p) > 0) {
-                uint8_t c = host_ring_at(p++);
-                if (c >= '0' && c <= '9') { val = val * 10 + (c - '0'); ok = true; }
-                else { ok = false; break; }
-            }
-            if (ok) {
-                if (cmd == 'T')      g_host_tilt_steps = sign * val;
-                else if (cmd == 'P') g_host_pan_steps  = sign * val;
-                else if (cmd == 'M') g_manual_mode     = (val != 0);
+            if (cmd == 'B') {
+                // "B:ex,ey" — 부호 있는 정수 두 개, 쉼표 구분
+                // ex: bbox_cx 오차 (320px 기준 스케일), ey: bbox_cy 오차 (240px 기준 스케일)
+                int ex = 0, ey = 0, sign = 1;
+                uint32_t p = g_host_tail + 2;
+                bool ok = false;
+                if ((int32_t)(nl_pos - p) > 0 && host_ring_at(p) == '-') { sign = -1; p++; }
+                else if ((int32_t)(nl_pos - p) > 0 && host_ring_at(p) == '+') { p++; }
+                while ((int32_t)(nl_pos - p) > 0) {
+                    uint8_t c = host_ring_at(p++);
+                    if (c >= '0' && c <= '9') { ex = ex * 10 + (c - '0'); ok = true; }
+                    else if (c == ',') { ex = sign * ex; sign = 1; break; }
+                    else { ok = false; break; }
+                }
+                if (ok) {
+                    ok = false;
+                    if ((int32_t)(nl_pos - p) > 0 && host_ring_at(p) == '-') { sign = -1; p++; }
+                    else if ((int32_t)(nl_pos - p) > 0 && host_ring_at(p) == '+') { p++; }
+                    while ((int32_t)(nl_pos - p) > 0) {
+                        uint8_t c = host_ring_at(p++);
+                        if (c >= '0' && c <= '9') { ey = ey * 10 + (c - '0'); ok = true; }
+                        else { ok = false; break; }
+                    }
+                }
+                if (ok) {
+                    g_host_bbox_ex    = ex;
+                    g_host_bbox_ey    = sign * ey;
+                    g_host_bbox_valid = true;
+                }
+            } else {
+                int val = 0, sign = 1;
+                uint32_t p = g_host_tail + 2;
+                if ((int32_t)(nl_pos - p) > 0 && host_ring_at(p) == '-') { sign = -1; p++; }
+                else if ((int32_t)(nl_pos - p) > 0 && host_ring_at(p) == '+') { p++; }
+                bool ok = false;
+                while ((int32_t)(nl_pos - p) > 0) {
+                    uint8_t c = host_ring_at(p++);
+                    if (c >= '0' && c <= '9') { val = val * 10 + (c - '0'); ok = true; }
+                    else { ok = false; break; }
+                }
+                if (ok) {
+                    if (cmd == 'T')      g_host_tilt_steps = sign * val;
+                    else if (cmd == 'P') g_host_pan_steps  = sign * val;
+                    else if (cmd == 'M') g_manual_mode     = (val != 0);
+                }
             }
         }
         g_host_tail = nl_pos + 1;
@@ -367,34 +399,9 @@ static int uart_init(void)
 }
 
 // ============================================================
-//  CORDIC 극좌표 변환 — ARM 소프트웨어 구현 (USE_HLS_CORDIC=0 시 사용)
-// ============================================================
-static const int32_t ATAN_T[16]={450,265,140,71,36,18,9,4,2,1,1,0,0,0,0,0};
-static const int32_t K_INV = 39797;
-
-static void polar_sw(int16_t xi, int16_t yi, uint16_t* dm, int16_t* at)
-{
-    int32_t x=xi, y=yi, z=0;
-    int ao = 0;
-    if (x < 0) { ao=(y>=0)?1800:-1800; x=-x; y=-y; }
-    for (int i=0;i<16;++i) {
-        int32_t xs=x>>i, ys=y>>i;
-        if (y<0){x-=ys;y+=xs;z-=ATAN_T[i];}
-        else    {x+=ys;y-=xs;z+=ATAN_T[i];}
-    }
-    int32_t d=(int32_t)(((int64_t)x*K_INV)>>16);
-    if(d<0)d=-d;
-    *dm=(uint16_t)(d>65535?65535:d);
-    int32_t fa=z+ao;
-    if(fa>1800)fa-=3600; if(fa<-1800)fa+=3600;
-    *at=(int16_t)fa; // 단위: 0.1도
-}
-
-// ============================================================
-//  CORDIC IP 호출 (USE_HLS_CORDIC=1 시 사용)
+//  CORDIC IP 호출 (AXI4-Lite)
 //  입력 순서: (y, x) — 카메라 좌표계(정면 0도) 변환 유지
 // ============================================================
-#if USE_HLS_CORDIC
 static void cordic_ip_call(int16_t xi, int16_t yi,
                             uint16_t* dm, int16_t* at)
 {
@@ -412,72 +419,17 @@ static void cordic_ip_call(int16_t xi, int16_t yi,
     *dm = (uint16_t)(CORDIC_RD(0x20) & 0xFFFFu);          // distance
     *at = (int16_t) (CORDIC_RD(0x30) & 0xFFFFu);          // angle_deg (0.1도 단위)
 }
-#endif // USE_HLS_CORDIC
 
 static void process_radar_target(const RadarTarget_t& t, uint16_t* dist_mm, int16_t* yaw_deg10)
 {
-    // (Y, X) 순서: 카메라 좌표계(정면 0도)로 변환 — HLS/SW 공통
-#if USE_HLS_CORDIC
+    // (Y, X) 순서: 카메라 좌표계(정면 0도)로 변환
     cordic_ip_call(t.y, t.x, dist_mm, yaw_deg10);
-#else
-    polar_sw(t.y, t.x, dist_mm, yaw_deg10);
-#endif
 }
 
 // ============================================================
-//  칼만 필터 — ARM 소프트웨어 구현 (USE_HLS_KALMAN=0 시 사용)
-// ============================================================
-static float kx[MAX_TARGETS][4];
-static float kP[MAX_TARGETS][4];
-static bool  ki[MAX_TARGETS];
-static int   km[MAX_TARGETS];
-
-static void kalman_reset(void)
-{
-    for(int i=0;i<MAX_TARGETS;++i){
-        for(int j=0;j<4;++j){kx[i][j]=0;kP[i][j]=1000;}
-        ki[i]=false; km[i]=0;
-    }
-}
-
-static void kalman_run(const RadarTarget_t* t, KalmanState_t* s)
-{
-    static const float Q[4]={1,1,10,10}, R[2]={100,100};
-    for(int i=0;i<MAX_TARGETS;++i){
-        bool v=t[i].valid;
-        if(!ki[i]&&v){
-            kx[i][0]=t[i].x; kx[i][1]=t[i].y;
-            kx[i][2]=0;      kx[i][3]=0;
-            for(int j=0;j<4;++j) kP[i][j]=1000;
-            ki[i]=true; km[i]=0;
-        } else if(ki[i]){
-            kx[i][0]+=0.1f*kx[i][2]; kx[i][1]+=0.1f*kx[i][3];
-            kP[i][0]+=0.01f*kP[i][2]+Q[0]; kP[i][1]+=0.01f*kP[i][3]+Q[1];
-            kP[i][2]+=Q[2]; kP[i][3]+=Q[3];
-            if(v){
-                float s0=kP[i][0]+R[0],s1=kP[i][1]+R[1];
-                float k0=kP[i][0]/s0,k1=kP[i][1]/s1;
-                float kvx=0.1f*kP[i][2]/s0,kvy=0.1f*kP[i][3]/s1;
-                float ix=t[i].x-kx[i][0],iy=t[i].y-kx[i][1];
-                kx[i][0]+=k0*ix;   kx[i][1]+=k1*iy;
-                kx[i][2]+=kvx*ix;  kx[i][3]+=kvy*iy;
-                kP[i][0]*=(1-k0);  kP[i][1]*=(1-k1);
-                kP[i][2]*=(1-kvx*0.1f); kP[i][3]*=(1-kvy*0.1f);
-                km[i]=0;
-            } else {
-                km[i]++;
-                if(km[i]>2) ki[i]=false;
-            }
-        }
-        s[i]={kx[i][0],kx[i][1],kx[i][2],kx[i][3],ki[i]};
-    }
-}
-
-// ============================================================
-//  Kalman Filter IP 함수 (USE_HLS_KALMAN=1 시 사용)
+//  Kalman Filter IP 함수
 //  내부 상태(st, P, st_init)는 PL LUTRAM에 유지 — PS 측 보관 불필요
 // ============================================================
-#if USE_HLS_KALMAN
 
 // targets_in 쓰기 헬퍼: RadarTarget_t → 64-bit AXI 메모리 패킹
 //   Word 0 at 0x20+8n : (uint16)y<<16 | (uint16)x
@@ -546,8 +498,6 @@ static void kalman_ip_run(const RadarTarget_t* tgt, KalmanState_t* out)
     for (int n = 0; n < MAX_TARGETS; ++n)
         kalman_read_state(n, &out[n]);
 }
-
-#endif // USE_HLS_KALMAN
 
 // ULN2003 모터 PID 상태 (pan/tilt 각축 독립)
 static float g_pan_prev_err  = 0.0f;
@@ -712,6 +662,40 @@ static void motor_update_full_host(int direct_pan_steps, int direct_tilt_steps)
 }
 
 // ============================================================
+//  AI 카메라 PID 모드 — bbox 픽셀 오차 → FPGA PID → Pan+Tilt 스텝
+//  PC는 bbox 중심 오차(ex, ey)만 전송. PID/슬루/스텝 계산은 FPGA 전담.
+//  ex: (center_x - frame_w/2) / (frame_w/2) * 160  (320px 기준 스케일)
+//  ey: (center_y - frame_h/2) / (frame_h/2) * 120  (240px 기준 스케일)
+// ============================================================
+static void motor_update_ai_bbox(int bbox_ex, int bbox_ey)
+{
+    g_had_target = true;
+
+    int dpan = motor_pid_step(
+        (float)bbox_ex, (float)(CAM_W_PX / 2),
+        MOTOR_PAN_DEADBAND,  MOTOR_KP, MOTOR_KD,
+        MOTOR_PAN_MIN_STEP,  MOTOR_PAN_MAX_STEP,
+        &g_pan_prev_err, &g_pan_cmd, 1.0f);
+
+    int dtilt = motor_pid_step(
+        (float)bbox_ey, (float)(CAM_H_PX / 2),
+        MOTOR_TILT_DEADBAND, MOTOR_KP, MOTOR_KD,
+        MOTOR_TILT_MIN_STEP, MOTOR_TILT_MAX_STEP,
+        &g_tilt_prev_err, &g_tilt_cmd, 1.0f);
+
+    if (dpan == 0 && dtilt == 0) return;
+    if (!(MOTOR_RD(0x00) & AP_IDLE)) return;
+
+    g_motor_abs_pan  += dpan;
+    g_motor_abs_tilt += dtilt;
+
+    MOTOR_WR(0x10, (u32)g_motor_abs_pan);
+    MOTOR_WR(0x18, (u32)g_motor_abs_tilt);
+    MOTOR_WR(0x20, MOTOR_SPEED_DELAY);
+    MOTOR_WR(0x00, AP_START);
+}
+
+// ============================================================
 //  MTI(영상 모션 감지) 서브시스템 제거됨 → legacy/mti_subsystem/ (2026-06-01)
 //  사유: PC YOLO 경로와 중복, Mock 상태(죽은 코드). 부활법은 해당 폴더 README 참조.
 // ============================================================
@@ -733,13 +717,8 @@ int main(void)
     if(uart_init()!=0) xil_printf("[-] Radar UART1 init failed; check xparameters.h\n");
     else xil_printf("[+] Radar UART1 OK (%u bps, EMIO PMODA)\n", (unsigned)RADAR_UART_BAUD);
 
-#if USE_HLS_KALMAN
     kalman_ip_reset();
     xil_printf("[+] Kalman IP (PL HLS) OK\n");
-#else
-    kalman_reset();
-    xil_printf("[+] Kalman SW (ARM) OK\n");
-#endif
 
     MOTOR_WR(0x10, 0); MOTOR_WR(0x18, 0); MOTOR_WR(0x20, MOTOR_SPEED_DELAY);
     MOTOR_WR(0x00, AP_START);
@@ -777,36 +756,38 @@ int main(void)
         }
 
         // 2. 칼만 필터 예측/보정
-#if USE_HLS_KALMAN
         kalman_ip_run(rtgt, ks);
-#else
-        kalman_run(rtgt, ks);
-#endif
 
         // 3. 모터 제어 (AI추적 > 레이더 단독 > 정지)
         host_accumulate();
         host_parse_commands();
 
-        if ((g_host_pan_steps != 0 || g_host_tilt_steps != 0) && g_host_cmd_cooldown == 0) {
-            // AI 트래킹 모드: PC YOLO가 Pan+Tilt 모두 제어
+        if (g_host_bbox_valid && g_host_cmd_cooldown == 0) {
+            // AI 추적 모드: PC bbox 오차 → FPGA PID → Pan+Tilt
+            motor_update_ai_bbox(g_host_bbox_ex, g_host_bbox_ey);
+            g_host_cmd_cooldown = HOST_CMD_COOLDOWN_FRAMES;
+            g_ai_lock_frames    = AI_LOCK_FRAMES;
+        } else if (g_manual_mode &&
+                   (g_host_pan_steps != 0 || g_host_tilt_steps != 0) &&
+                   g_host_cmd_cooldown == 0) {
+            // 수동 모드: PC 방향키 직접 스텝 (캘리브레이션/점검용)
             motor_update_full_host(g_host_pan_steps, g_host_tilt_steps);
             g_host_cmd_cooldown = HOST_CMD_COOLDOWN_FRAMES;
-            g_ai_lock_frames    = AI_LOCK_FRAMES;  // 레이더 오버라이드 차단 시작
         } else if (g_host_cmd_cooldown > 0) {
             // 모터 이동 완료 대기 — 레이더 개입 없음
             g_host_cmd_cooldown--;
             if (g_ai_lock_frames > 0) g_ai_lock_frames--;
         } else if (g_ai_lock_frames > 0) {
-            // 쿨다운 끝, 아직 AI 잠금 중 — 모터 현재 위치 유지, 레이더 오버라이드 차단
-            // C++ 다음 명령 도착 전 공백을 레이더가 채우지 못하게 막는 핵심 구간
+            // AI 잠금 중 — 레이더 오버라이드 차단 (다음 bbox 도착 전 공백 보호)
             g_ai_lock_frames--;
         } else if (rvc > 0) {
             // 레이더 단독 모드: AI 잠금 완전 해제 후에만 진입
-            motor_update_hybrid(angle_to_px(rang) - CAM_W_PX / 2, true, g_host_tilt_steps);
+            motor_update_hybrid(angle_to_px(rang) - CAM_W_PX / 2, true, 0);
         } else {
             // 표적 없음
             g_had_target = false;
         }
+        g_host_bbox_valid = false;
         g_host_pan_steps  = 0;
         g_host_tilt_steps = 0;
 

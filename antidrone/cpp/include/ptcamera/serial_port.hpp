@@ -30,6 +30,9 @@ public:
     bool sendTiltCommand(int tiltSteps, std::string* error = nullptr);
     bool sendPanCommand(int panSteps,   std::string* error = nullptr);
 
+    // AI 추적 모드: bbox 중심 오차 (320×240 기준 스케일) → FPGA PID
+    bool sendBBox(int ex, int ey, std::string* error = nullptr);
+
     bool sendManualMode(bool enable, std::string* error = nullptr);
     bool sendPanDegrees(double degrees, std::string* error = nullptr);
     bool sendTiltDegrees(double degrees, std::string* error = nullptr);

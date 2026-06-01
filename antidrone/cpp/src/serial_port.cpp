@@ -138,6 +138,12 @@ bool SerialPort::sendPanCommand(int panSteps, std::string* error) {
     return writeLine(ss.str(), error);
 }
 
+bool SerialPort::sendBBox(int ex, int ey, std::string* error) {
+    std::ostringstream ss;
+    ss << "B:" << ex << ',' << ey << '\n';
+    return writeLine(ss.str(), error);
+}
+
 bool SerialPort::sendManualMode(bool enable, std::string* error) {
     return writeLine(enable ? "M:1\n" : "M:0\n", error);
 }
@@ -356,6 +362,12 @@ bool SerialPort::sendTiltCommand(int tiltSteps, std::string* error) {
 bool SerialPort::sendPanCommand(int panSteps, std::string* error) {
     std::ostringstream ss;
     ss << "P:" << panSteps << '\n';
+    return writeLine(ss.str(), error);
+}
+
+bool SerialPort::sendBBox(int ex, int ey, std::string* error) {
+    std::ostringstream ss;
+    ss << "B:" << ex << ',' << ey << '\n';
     return writeLine(ss.str(), error);
 }
 
