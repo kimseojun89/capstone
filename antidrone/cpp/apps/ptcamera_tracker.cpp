@@ -1,4 +1,4 @@
-#include "ptcamera/control.hpp"
+#include "ptcamera/control.hpp"  // ControlTelemetry 구조체 (overlay용)
 #include "ptcamera/overlay.hpp"
 #include "ptcamera/pipeline.hpp"
 #include "ptcamera/serial_port.hpp"
@@ -135,8 +135,9 @@ int main(int argc, char** argv) {
 
     try {
         ptcamera::TrackingPipeline pipeline(settings);
-        ptcamera::ControlLoop control(settings);
         ptcamera::SerialPort serial;
+        // PID 계산은 FPGA 전담 — ControlLoop 제거됨.
+        // PC는 bbox 중심 오차(ex, ey)를 sendBBox()로 전송하고 FPGA가 모터 스텝을 계산한다.
 
         // Always open serial — needed for radar relay even when motor is off
         if (!ensureSerialOpen(serial, settings)) {
@@ -244,40 +245,35 @@ int main(int argc, char** argv) {
             }
 
             auto result = pipeline.update(frame, dt);
-            auto telemetry = control.update(result.target, frame.size(), dt);
             statusLines.clear();
 
+            // bbox 오차 계산 (320×240 기준 스케일 → FPGA motor_pid_step과 동일 정규화)
+            ptcamera::ControlTelemetry telemetry;
+            if (result.target) {
+                telemetry.targetFound = true;
+                telemetry.source      = result.target->source;
+                const float fw2 = static_cast<float>(frame.cols) / 2.0f;
+                const float fh2 = static_cast<float>(frame.rows) / 2.0f;
+                telemetry.errorX = (result.target->center.x - fw2) / fw2 * 160.0f;
+                telemetry.errorY = (result.target->center.y - fh2) / fh2 * 120.0f;
+            }
+
             if (motorEnabled) {
-                // Move & Re-detect: 이동 완료 시간 기반 동적 쿨다운
-                // - 명령 전송 후 모터 실제 이동 시간 + 1프레임 안정화 대기
-                // - 대기 중엔 PID 상태도 리셋하여 다음 명령은 최신 bbox 기준 fresh start
-                if (now >= nextSendAllowed &&
-                    (telemetry.command.panSteps != 0 || telemetry.command.tiltSteps != 0)) {
+                // FPGA가 PID를 담당 — PC는 bbox 오차를 매 프레임 전송.
+                // FPGA 내부 cooldown(HOST_CMD_COOLDOWN_FRAMES=2)이 모터 이동 완료를 보장.
+                if (now >= nextSendAllowed && telemetry.targetFound) {
                     if (!serial.isOpen()) {
                         statusLines.push_back("serial not open, motor off");
                     } else {
                         std::string errMsg;
-                        bool ok = true;
-                        if (telemetry.targetFound && telemetry.command.panSteps != 0) {
-                            ok = serial.sendPanCommand(telemetry.command.panSteps, &errMsg);
-                        }
-                        if (ok) {
-                            ok = serial.sendTiltCommand(telemetry.command.tiltSteps, &errMsg);
-                        }
-                        if (ok) {
-                            // 동적 쿨다운: max(이동시간 + 안정화, sendInterval 최솟값)
-                            // MOTOR_SPEED_DELAY=200 → 0.57ms/step
-                            constexpr double STEP_SEC   = 0.00057;
-                            constexpr double STABLE_SEC = 0.033;   // 1프레임 안정화 여유
-                            const double moveSec =
-                                std::abs(telemetry.command.panSteps) * STEP_SEC;
-                            const double cooldown =
-                                std::max(moveSec + STABLE_SEC, settings.sendInterval);
-                            nextSendAllowed =
-                                now + std::chrono::duration<double>(cooldown);
-                            control.reset();  // PID 리셋: 다음 명령은 최신 bbox 기준으로 계산
-                        } else {
+                        const int ex = static_cast<int>(telemetry.errorX);
+                        const int ey = static_cast<int>(telemetry.errorY);
+                        if (!serial.sendBBox(ex, ey, &errMsg)) {
                             statusLines.push_back(errMsg);
+                        } else {
+                            // 최소 전송 간격만 유지 (FPGA가 rate 제어)
+                            nextSendAllowed =
+                                now + std::chrono::duration<double>(settings.sendInterval);
                         }
                     }
                 }

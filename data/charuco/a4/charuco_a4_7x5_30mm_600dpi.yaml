@@ -1,0 +1,31 @@
+created_utc: '2026-06-01T03:07:01+00:00'
+opencv_version: 4.13.0
+board:
+  squares_x: 7
+  squares_y: 5
+  square_length_mm: 30.0
+  marker_length_mm: 22.0
+  dictionary: DICT_4X4_50
+  border_bits: 1
+print:
+  dpi: 600
+  page_size: a4
+  margin_mm: 20.0
+  board_width_mm: 210.0
+  board_height_mm: 150.0
+  exact_board_canvas_width_mm: 250.0
+  exact_board_canvas_height_mm: 190.0
+  page_width_mm: 297.0
+  page_height_mm: 210.0
+  exact_board_canvas_width_px: 5906
+  exact_board_canvas_height_px: 4488
+  page_width_px: 7016
+  page_height_px: 4961
+  margin_px: 472
+  offset_x_px: 555
+  offset_y_px: 236
+  preserves_square_length_mm: true
+files:
+  png: C:\Users\kimse\capstone\data\charuco\a4\charuco_a4_7x5_30mm_600dpi.png
+  pdf: C:\Users\kimse\capstone\data\charuco\a4\charuco_a4_7x5_30mm_600dpi.pdf
+units: mm

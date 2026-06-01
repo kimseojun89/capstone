@@ -1,0 +1,104 @@
+created_utc: '2026-06-01T04:10:15+00:00'
+opencv_version: 4.13.0
+calibration_model: ChArUco corners matched to board points, solved with cv2.calibrateCamera
+image_size:
+  width_px: 1920
+  height_px: 1080
+camera_matrix:
+  rows: 3
+  cols: 3
+  data:
+  - - 1605.6050453498235
+    - 0.0
+    - 956.5012517619858
+  - - 0.0
+    - 2803.669021831283
+    - 530.7627008784095
+  - - 0.0
+    - 0.0
+    - 1.0
+distortion_coefficients:
+  rows: 5
+  cols: 1
+  data:
+  - -0.022851617378798754
+  - 0.4720576631346306
+  - -0.0025310633943512453
+  - -0.0006930093626824276
+  - -1.3892631820550494
+rms_reprojection_error_px: 0.39384905061320785
+mean_per_view_reprojection_error_px: 0.3305604940369016
+board:
+  squares_x: 7
+  squares_y: 5
+  square_length_mm: 30.0
+  marker_length_mm: 22.0
+  dictionary: DICT_4X4_50
+valid_image_count: 21
+rejected_image_count: 0
+used_frames:
+- image_file: intrinsic_20260601_130524_000.png
+  charuco_corners: 24
+  reprojection_error_px: 0.3202130198478699
+- image_file: intrinsic_20260601_130524_001.png
+  charuco_corners: 24
+  reprojection_error_px: 0.2579334080219269
+- image_file: intrinsic_20260601_130524_002.png
+  charuco_corners: 24
+  reprojection_error_px: 0.27772417664527893
+- image_file: intrinsic_20260601_130524_003.png
+  charuco_corners: 24
+  reprojection_error_px: 0.2839728593826294
+- image_file: intrinsic_20260601_130524_004.png
+  charuco_corners: 24
+  reprojection_error_px: 0.2618951201438904
+- image_file: intrinsic_20260601_130524_005.png
+  charuco_corners: 24
+  reprojection_error_px: 0.26743629574775696
+- image_file: intrinsic_20260601_130524_006.png
+  charuco_corners: 24
+  reprojection_error_px: 0.3290824592113495
+- image_file: intrinsic_20260601_130524_007.png
+  charuco_corners: 24
+  reprojection_error_px: 0.4002532958984375
+- image_file: intrinsic_20260601_130524_008.png
+  charuco_corners: 24
+  reprojection_error_px: 0.3286239206790924
+- image_file: intrinsic_20260601_130524_009.png
+  charuco_corners: 24
+  reprojection_error_px: 0.2885914146900177
+- image_file: intrinsic_20260601_130524_010.png
+  charuco_corners: 24
+  reprojection_error_px: 0.33694377541542053
+- image_file: intrinsic_20260601_130524_011.png
+  charuco_corners: 24
+  reprojection_error_px: 0.37147507071495056
+- image_file: intrinsic_20260601_130524_012.png
+  charuco_corners: 24
+  reprojection_error_px: 0.32060229778289795
+- image_file: intrinsic_20260601_130524_013.png
+  charuco_corners: 24
+  reprojection_error_px: 0.4031428396701813
+- image_file: intrinsic_20260601_130524_014.png
+  charuco_corners: 24
+  reprojection_error_px: 0.29644346237182617
+- image_file: intrinsic_20260601_130524_015.png
+  charuco_corners: 24
+  reprojection_error_px: 0.3634927272796631
+- image_file: intrinsic_20260601_130524_016.png
+  charuco_corners: 24
+  reprojection_error_px: 0.316854327917099
+- image_file: intrinsic_20260601_130524_017.png
+  charuco_corners: 24
+  reprojection_error_px: 0.31992295384407043
+- image_file: intrinsic_20260601_130524_018.png
+  charuco_corners: 24
+  reprojection_error_px: 0.27922460436820984
+- image_file: intrinsic_20260601_130524_019.png
+  charuco_corners: 24
+  reprojection_error_px: 0.379416823387146
+- image_file: intrinsic_20260601_130524_020.png
+  charuco_corners: 24
+  reprojection_error_px: 0.5385255217552185
+rejected_frames: []
+units: mm
