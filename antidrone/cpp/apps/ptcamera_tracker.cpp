@@ -1,4 +1,4 @@
-#include "ptcamera/control.hpp"  // ControlTelemetry 구조체 (overlay용)
+#include "ptcamera/control.hpp"
 #include "ptcamera/overlay.hpp"
 #include "ptcamera/pipeline.hpp"
 #include "ptcamera/serial_port.hpp"
@@ -12,7 +12,7 @@
 #    define WIN32_LEAN_AND_MEAN
 #  endif
 #  ifndef NOMINMAX
-#    define NOMINMAX   // windows.h의 min/max 매크로가 std::min/std::max를 깨뜨리는 것 방지
+#    define NOMINMAX
 #  endif
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
@@ -24,11 +24,11 @@
 #endif
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace {
@@ -64,8 +64,8 @@ std::string readStringArg(int argc, char** argv, int& index) {
 void printUsage() {
     std::cout << "Usage: ptcamera_tracker [--model path_or_dir] [--device CPU] [--camera 0]\n"
                  "                        [--camera-width 1920] [--camera-height 1080]\n"
-                 "                        [--serial-port COM3] [--baud 256000]\n"
-                 "                        [--enable-motor] [--conf 0.25] [--send-interval 0.12]\n"
+                 "                        [--serial-port COM4] [--baud 256000]\n"
+                 "                        [--enable-motor] [--conf 0.25] [--send-interval 0.033]\n"
                  "                        [--manual-mode]\n";
 }
 
@@ -136,12 +136,9 @@ int main(int argc, char** argv) {
     try {
         ptcamera::TrackingPipeline pipeline(settings);
         ptcamera::SerialPort serial;
-        // PID 계산은 FPGA 전담 — ControlLoop 제거됨.
-        // PC는 bbox 중심 오차(ex, ey)를 sendBBox()로 전송하고 FPGA가 모터 스텝을 계산한다.
 
-        // Always open serial — needed for radar relay even when motor is off
         if (!ensureSerialOpen(serial, settings)) {
-            std::cerr << "Serial not open — motor disabled, no radar relay\n";
+            std::cerr << "Serial not open; motor disabled, no radar relay\n";
             motorEnabled = false;
         } else if (!motorEnabled) {
             std::cout << "Serial open for radar relay (motor disabled; press space to enable)\n";
@@ -159,7 +156,6 @@ int main(int argc, char** argv) {
         udpDest.sin_port   = htons(9999);
         inet_pton(AF_INET, "127.0.0.1", &udpDest.sin_addr);
 
-        // Camera frame stream -> unified GUI (UDP 9998)
 #ifdef _WIN32
         SOCKET camSock   = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         SOCKET telemSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -172,7 +168,6 @@ int main(int argc, char** argv) {
         camDest.sin_port   = htons(9998);
         inet_pton(AF_INET, "127.0.0.1", &camDest.sin_addr);
 
-        // Telemetry -> unified GUI (UDP 10000, JSON)
         sockaddr_in telemDest = {};
         telemDest.sin_family = AF_INET;
         telemDest.sin_port   = htons(10000);
@@ -201,8 +196,8 @@ int main(int argc, char** argv) {
 
         cv::namedWindow("ptcamera_tracker", cv::WINDOW_NORMAL);
 
-        auto last            = std::chrono::steady_clock::now();
-        auto nextSendAllowed = std::chrono::steady_clock::now();  // 처음부터 전송 가능
+        auto last = std::chrono::steady_clock::now();
+        auto nextSendAllowed = std::chrono::steady_clock::now();
         double fps = 0.0;
         std::vector<std::string> statusLines;
         std::string relayBuf;
@@ -224,7 +219,6 @@ int main(int argc, char** argv) {
                 fps = fps <= 0.0 ? 1.0 / dt : 0.9 * fps + 0.1 * (1.0 / dt);
             }
 
-            // Drain FPGA UART0 output, relay [RADAR] lines to ppi_viewer via UDP
             if (serial.isOpen()) {
                 std::string chunk;
                 serial.readAvailable(chunk);
@@ -232,7 +226,9 @@ int main(int argc, char** argv) {
                     relayBuf += chunk;
                     while (true) {
                         const auto nl = relayBuf.find('\n');
-                        if (nl == std::string::npos) break;
+                        if (nl == std::string::npos) {
+                            break;
+                        }
                         std::string line = relayBuf.substr(0, nl);
                         relayBuf.erase(0, nl + 1);
                         if (line.find("[RADAR]") != std::string::npos) {
@@ -247,7 +243,6 @@ int main(int argc, char** argv) {
             auto result = pipeline.update(frame, dt);
             statusLines.clear();
 
-            // bbox 오차 계산 (320×240 기준 스케일 → FPGA motor_pid_step과 동일 정규화)
             ptcamera::ControlTelemetry telemetry;
             if (result.target) {
                 telemetry.targetFound = true;
@@ -259,8 +254,6 @@ int main(int argc, char** argv) {
             }
 
             if (motorEnabled) {
-                // FPGA가 PID를 담당 — PC는 bbox 오차를 매 프레임 전송.
-                // FPGA 내부 cooldown(HOST_CMD_COOLDOWN_FRAMES=2)이 모터 이동 완료를 보장.
                 if (now >= nextSendAllowed && telemetry.targetFound) {
                     if (!serial.isOpen()) {
                         statusLines.push_back("serial not open, motor off");
@@ -271,9 +264,9 @@ int main(int argc, char** argv) {
                         if (!serial.sendBBox(ex, ey, &errMsg)) {
                             statusLines.push_back(errMsg);
                         } else {
-                            // 최소 전송 간격만 유지 (FPGA가 rate 제어)
                             nextSendAllowed =
-                                now + std::chrono::duration<double>(settings.sendInterval);
+                                now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                          std::chrono::duration<double>(settings.sendInterval));
                         }
                     }
                 }
@@ -291,7 +284,6 @@ int main(int argc, char** argv) {
 
             cv::imshow("ptcamera_tracker", frame);
 
-            // Stream annotated frame to unified GUI (640x360 JPEG, UDP 9998)
             {
                 static cv::Mat streamBuf;
                 static std::vector<uchar> jpegBuf;
@@ -306,17 +298,19 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // Telemetry JSON → unified GUI (UDP 10000)
             {
-                float cx = 0.0f, cy = 0.0f, conf = 0.0f;
+                float cx = 0.0f;
+                float cy = 0.0f;
+                float conf = 0.0f;
                 if (result.target) {
                     cx   = result.target->center.x;
                     cy   = result.target->center.y;
                     conf = result.target->confidence;
                 }
                 char telemJson[256];
-                // pan_steps/tilt_steps → FPGA에서 계산, PC에서는 bbox 오차(err_x/y) 전송
-                const int n = snprintf(telemJson, sizeof(telemJson),
+                const int n = static_cast<int>(std::snprintf(
+                    telemJson,
+                    sizeof(telemJson),
                     "{\"motor_enabled\":%s,\"target_found\":%s,"
                     "\"bbox_ex\":%d,\"bbox_ey\":%d,"
                     "\"center_x\":%.1f,\"center_y\":%.1f,"
@@ -325,7 +319,7 @@ int main(int argc, char** argv) {
                     telemetry.targetFound ? "true" : "false",
                     static_cast<int>(telemetry.errorX),
                     static_cast<int>(telemetry.errorY),
-                    cx, cy, conf, static_cast<float>(fps));
+                    cx, cy, conf, static_cast<float>(fps)));
                 if (n > 0 && n < static_cast<int>(sizeof(telemJson))) {
                     sendto(telemSock, telemJson, n, 0,
                            reinterpret_cast<const sockaddr*>(&telemDest),
@@ -352,38 +346,49 @@ int main(int argc, char** argv) {
                 if (manualMode) {
                     motorEnabled = false;
                 }
-                std::cout << "Manual mode " << (manualMode ? "ON (arrows: 1deg, shift+arrows: 0.1deg)" : "OFF") << '\n';
+                std::cout << "Manual mode "
+                          << (manualMode ? "ON (arrows: 1deg)" : "OFF") << '\n';
             }
-            // 수동 모드 방향키 조작
+
             if (manualMode && serial.isOpen()) {
-                constexpr double DEG_NORMAL = 1.0;
-                constexpr double DEG_FINE   = 0.1;
-                // OpenCV arrow key codes on Windows
-                if (key == 2424832) {  // Left
-                    serial.sendPanDegrees(-DEG_NORMAL);
+                constexpr double degNormal = 1.0;
+                if (key == 2424832) {
+                    serial.sendPanDegrees(-degNormal);
                     std::cout << "Manual: pan -1 deg\n";
-                } else if (key == 2555904) {  // Right
-                    serial.sendPanDegrees(+DEG_NORMAL);
+                } else if (key == 2555904) {
+                    serial.sendPanDegrees(+degNormal);
                     std::cout << "Manual: pan +1 deg\n";
-                } else if (key == 2490368) {  // Up
-                    serial.sendTiltDegrees(+DEG_NORMAL);
+                } else if (key == 2490368) {
+                    serial.sendTiltDegrees(+degNormal);
                     std::cout << "Manual: tilt +1 deg\n";
-                } else if (key == 2621440) {  // Down
-                    serial.sendTiltDegrees(-DEG_NORMAL);
+                } else if (key == 2621440) {
+                    serial.sendTiltDegrees(-degNormal);
                     std::cout << "Manual: tilt -1 deg\n";
                 }
             }
         }
 
 #ifdef _WIN32
-        if (udpSock   != INVALID_SOCKET) closesocket(udpSock);
-        if (camSock   != INVALID_SOCKET) closesocket(camSock);
-        if (telemSock != INVALID_SOCKET) closesocket(telemSock);
+        if (udpSock != INVALID_SOCKET) {
+            closesocket(udpSock);
+        }
+        if (camSock != INVALID_SOCKET) {
+            closesocket(camSock);
+        }
+        if (telemSock != INVALID_SOCKET) {
+            closesocket(telemSock);
+        }
         WSACleanup();
 #else
-        if (udpSock   >= 0) ::close(udpSock);
-        if (camSock   >= 0) ::close(camSock);
-        if (telemSock >= 0) ::close(telemSock);
+        if (udpSock >= 0) {
+            ::close(udpSock);
+        }
+        if (camSock >= 0) {
+            ::close(camSock);
+        }
+        if (telemSock >= 0) {
+            ::close(telemSock);
+        }
 #endif
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

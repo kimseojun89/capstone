@@ -1,192 +1,132 @@
-# Anti-Drone YOLOv8x — OpenVINO → ONNX Runtime CUDA 전환 작업 정리
+# AI 모델 변경 시 현재 환경 적용 및 검증 가이드
 
-> 작업일: 2026-05-28  
-> 환경: Windows 11 Home 25H2 / AMD Ryzen 5 6600H / **NVIDIA RTX 3050 Laptop 4GB** / CUDA 12.1
-
----
-
-## 1. 배경 및 목적
-
-| 항목 | 내용 |
-|------|------|
-| 기존 추론 엔진 | OpenVINO (`ov::Core`) — CPU 전용 기본값 |
-| 기존 모델 포맷 | OpenVINO IR (`best.xml` / `best.bin`, 272MB) |
-| 문제점 | OpenVINO GPU 플러그인은 Intel GPU 전용 → RTX 3050 CUDA 미활용 |
-| 목표 | ONNX Runtime + CUDA 백엔드로 RTX 3050에서 GPU 가속 추론 |
+> 기준 환경: Windows 11 / NVIDIA RTX 3050 Laptop 4GB / ONNX Runtime GPU / CUDA 12 계열  
+> 목적: 모델을 바꿀 때 현재 C++ 실행 환경에서 바로 로드되고, CUDA 또는 CPU로 정상 추론되는지 확인한다.
 
 ---
 
-## 2. 작업 결과 요약
+## 1. 이 문서의 목적
 
-```
+이 문서는 현재 프로젝트에서 AI 모델을 교체하거나 재학습 모델을 반영할 때 필요한 파일 배치, 빌드, 실행, 검증 절차를 정리한다.
+
+핵심 확인 항목은 다음과 같다.
+
+| 항목 | 확인 내용 |
+|------|-----------|
+| 모델 형식 | ONNX 모델 파일을 사용한다. 기본 파일명은 `best.onnx`이다. |
+| 기본 경로 | `antidrone/models/drone_yolov8x/best.onnx` |
+| 추론 런타임 | ONNX Runtime C++ |
+| 기본 디바이스 | CUDA, 실패 시 CPU fallback |
+| 실행 검증 | `detector_viewer.exe`, `tracking_viewer.exe`, `ptcamera_tracker.exe` |
+
+---
+
+## 2. 현재 모델 적용 구조
+
+```text
 capstone/
-├── antidrone/
-│   ├── models/drone_yolov8x/
-│   │   ├── best.pt                      # 원본 PyTorch 가중치 (130MB)
-│   │   ├── best.onnx                    # ★ 신규 변환 (260MB, opset 17)
-│   │   └── best_openvino_model/         # 기존 OpenVINO IR (유지)
-│   └── cpp/
-│       ├── CMakeLists.txt               # ★ 수정: OpenVINO → ONNX Runtime
-│       ├── include/ptcamera/
-│       │   ├── detector.hpp             # ★ 수정: ov:: → Ort::
-│       │   └── settings.hpp             # ★ 수정: openvinoDevice → inferenceDevice
-│       ├── src/
-│       │   ├── detector.cpp             # ★ 전면 재작성
-│       │   ├── settings.cpp             # ★ 수정: 기본 모델 경로
-│       │   └── serial_port.cpp          # WinAPI 시리얼 구현
-│       ├── apps/
-│       │   ├── detector_viewer.cpp      # ★ 수정: 필드명 업데이트
-│       │   ├── ptcamera_tracker.cpp     # ★ 수정: 필드명 업데이트
-│       │   └── tracking_viewer.cpp      # ★ 수정: 필드명 업데이트
-│       └── build_win/                   # ★ 신규: Windows 빌드 출력
-│           ├── detector_viewer.exe
-│           ├── tracking_viewer.exe
-│           ├── ptcamera_tracker.exe
-│           ├── onnxruntime.dll
-│           ├── onnxruntime_providers_cuda.dll
-│           ├── opencv_world4100.dll
-│           └── cudart64_12.dll 외 cuDNN DLLs
-├── onnxruntime-gpu/
-│   └── onnxruntime-win-x64-gpu-1.20.1/ # ONNX Runtime C++ GPU 패키지
-└── ONNX_CUDA_Migration.md              # 이 파일
+├─ antidrone/
+│  ├─ models/
+│  │  └─ drone_yolov8x/
+│  │     ├─ best.pt      # 학습 원본 또는 재변환용 PyTorch 가중치
+│  │     └─ best.onnx    # C++ 앱이 기본으로 읽는 ONNX 모델
+│  └─ cpp/
+│     ├─ CMakeLists.txt
+│     ├─ include/ptcamera/
+│     │  ├─ detector.hpp
+│     │  └─ settings.hpp
+│     ├─ src/
+│     │  ├─ detector.cpp
+│     │  └─ settings.cpp
+│     └─ build_win/
+│        ├─ detector_viewer.exe
+│        ├─ tracking_viewer.exe
+│        ├─ ptcamera_tracker.exe
+│        ├─ onnxruntime.dll
+│        ├─ onnxruntime_providers_cuda.dll
+│        ├─ opencv_world4100.dll
+│        └─ CUDA/cuDNN 관련 DLL
+└─ onnxruntime-gpu/
+   └─ onnxruntime-win-x64-gpu-1.20.1/
 ```
+
+`settings.cpp`의 기본 모델 경로는 다음 위치를 가리킨다.
+
+```cpp
+antidrone/models/drone_yolov8x/best.onnx
+```
+
+다른 모델을 테스트할 때는 기존 파일을 덮어쓰기 전에 `--model` 옵션으로 먼저 검증한다.
 
 ---
 
-## 3. 단계별 작업 내용
+## 3. 새 모델 준비
 
-### Step 1 — ONNX 모델 변환 (Python)
+### 3.1 ONNX로 변환
 
-**설치한 패키지**
-```
-Python 3.11.9 (winget)
-torch 2.5.1+cu121
-torchvision 0.20.1+cu121
-ultralytics 8.4.56
-onnx 1.21.0
-onnxruntime-gpu 1.26.0
-onnxslim 0.1.94
-```
+YOLO 계열 모델은 현재 C++ 후처리 코드와 출력 형태가 맞아야 한다. 현재 코드는 일반적인 YOLO 출력인 `[1, 5, 8400]` 또는 `[1, 8400, 5]` 형태를 처리한다.
 
-**변환 명령**
+예시 변환:
+
 ```python
 from ultralytics import YOLO
+
 model = YOLO("best.pt")
-model.export(format="onnx", imgsz=640, dynamic=False, simplify=True, opset=17, device="cuda")
-# → best.onnx (260MB, [1,3,640,640] → [1,5,8400])
+model.export(
+    format="onnx",
+    imgsz=640,
+    dynamic=False,
+    simplify=True,
+    opset=17,
+    device="cuda",
+)
+```
+
+변환 후 확인할 사항:
+
+| 항목 | 권장값 |
+|------|--------|
+| 입력 크기 | 640x640 |
+| 입력 layout | NCHW, float32 |
+| 입력 채널 | RGB 기준으로 학습된 YOLO 모델 |
+| 출력 | detection head 출력, rank 3 |
+| 클래스 수 | 현재 후처리와 설정이 기대하는 클래스 구성과 일치 |
+
+### 3.2 모델 파일 배치
+
+기본 모델로 교체하려면 아래 파일을 교체한다.
+
+```text
+antidrone/models/drone_yolov8x/best.onnx
+```
+
+먼저 테스트만 하려면 별도 경로에 두고 실행 시 `--model`로 지정한다.
+
+```powershell
+.\detector_viewer.exe --model C:\path\to\new_model.onnx
+```
+
+디렉터리를 지정하는 경우, 해당 디렉터리 안에 `best.onnx`가 있어야 한다.
+
+```powershell
+.\detector_viewer.exe --model C:\path\to\model_dir
 ```
 
 ---
 
-### Step 2 — ONNX Runtime C++ GPU 패키지
+## 4. 빌드 환경 확인
 
-- **버전:** `onnxruntime-win-x64-gpu-1.20.1`
-- **다운로드:** https://github.com/microsoft/onnxruntime/releases/tag/v1.20.1
-- **설치 경로:** `C:\Users\kimse\capstone\onnxruntime-gpu\onnxruntime-win-x64-gpu-1.20.1\`
-- **포함 DLL:**
-  - `onnxruntime.dll` — 메인 라이브러리
-  - `onnxruntime_providers_cuda.dll` — CUDA 실행 공급자
-  - `onnxruntime_providers_shared.dll` — 공유 공급자
-  - `onnxruntime_providers_tensorrt.dll` — TensorRT 공급자 (추후 사용 가능)
+현재 C++ 빌드는 ONNX Runtime GPU 패키지를 사용한다.
 
----
+| 항목 | 현재 기준 |
+|------|-----------|
+| ONNX Runtime | `onnxruntime-win-x64-gpu-1.20.1` |
+| ONNX Runtime 경로 | `C:/Users/kimse/capstone/onnxruntime-gpu/onnxruntime-win-x64-gpu-1.20.1` |
+| OpenCV | `C:/opencv/build/x64/vc16/lib` |
+| 빌드 출력 | `antidrone/cpp/build_win` |
 
-### Step 3 — C++ 코드 수정
+빌드 명령:
 
-#### `settings.hpp`
-```cpp
-// 변경 전
-std::string openvinoDevice = "CPU";
-std::string resolvedOpenvinoDevice;
-
-// 변경 후
-std::string inferenceDevice = "CUDA";   // "CUDA" or "CPU"
-std::string resolvedDevice;
-```
-
-#### `detector.hpp`
-```cpp
-// 변경 전
-#include <openvino/openvino.hpp>
-class YoloOpenVinoDetector { ... };
-
-// 변경 후
-#include <onnxruntime_cxx_api.h>
-class YoloDetector {
-    Ort::Env env_;
-    Ort::Session session_;
-    std::string inputName_, outputName_;
-};
-using YoloOpenVinoDetector = YoloDetector;  // 하위 호환 alias
-```
-
-#### `detector.cpp` — 주요 변경 흐름
-```cpp
-// 초기화: OpenVINO
-ov::Core core_;
-auto model = core_.read_model(xmlPath);
-compiledModel_ = core_.compile_model(model, "CPU");
-
-// 초기화: ONNX Runtime CUDA
-OrtCUDAProviderOptions cudaOptions{};
-cudaOptions.device_id = 0;
-sessionOptions.AppendExecutionProvider_CUDA(cudaOptions);
-session_ = Ort::Session(env_, modelPath.wstring().c_str(), sessionOptions);
-
-// 추론: OpenVINO
-inferRequest_.set_input_tensor(inputTensor);
-inferRequest_.infer();
-auto output = inferRequest_.get_output_tensor();
-
-// 추론: ONNX Runtime
-auto outputs = session_.Run(Ort::RunOptions{nullptr},
-    inputNames, &inputTensor, 1, outputNames, 1);
-const float* data = outputs[0].GetTensorData<float>();
-```
-
-#### `settings.cpp`
-```cpp
-// 변경 전
-return (path / "models" / "drone_yolov8x" / "best_openvino_model").string();
-
-// 변경 후
-return (path / "models" / "drone_yolov8x" / "best.onnx").string();
-```
-
-#### `serial_port.cpp` — Windows WinAPI 시리얼 구현
-
-Windows에서는 `CreateFile`, `SetCommState`, `COMMTIMEOUTS`, `ReadFile`, `WriteFile` 기반으로 COM 포트를 직접 연다. `ptcamera_tracker.exe`가 COM4를 독점하고, FPGA 로그를 읽어 GUI로 UDP 릴레이한다.
-
-#### `CMakeLists.txt`
-```cmake
-# 변경 전
-find_package(OpenVINO REQUIRED COMPONENTS Runtime)
-target_link_libraries(ptcamera_core PUBLIC ${OpenCV_LIBS} openvino::runtime)
-
-# 변경 후
-set(ONNXRUNTIME_DIR "C:/Users/kimse/capstone/onnxruntime-gpu/onnxruntime-win-x64-gpu-1.20.1")
-add_library(onnxruntime SHARED IMPORTED GLOBAL)
-set_target_properties(onnxruntime PROPERTIES
-    IMPORTED_IMPLIB   "${ONNXRUNTIME_DIR}/lib/onnxruntime.lib"
-    IMPORTED_LOCATION "${ONNXRUNTIME_DIR}/lib/onnxruntime.dll"
-    INTERFACE_INCLUDE_DIRECTORIES "${ONNXRUNTIME_DIR}/include")
-target_link_libraries(ptcamera_core PUBLIC ${OpenCV_LIBS} onnxruntime)
-# + POST_BUILD: ONNX Runtime DLL 자동 복사
-```
-
----
-
-### Step 4 — Windows 빌드 환경 구성
-
-| 도구 | 버전 | 설치 방법 |
-|------|------|-----------|
-| Python 3.11 | 3.11.9 | `winget install Python.Python.3.11` |
-| CMake | 4.3.3 | `winget install Kitware.CMake` |
-| Visual Studio Build Tools 2022 | 17.14 | `winget install Microsoft.VisualStudio.2022.BuildTools` |
-| Windows SDK | 10.0.26100.0 | 이미 설치됨 |
-| OpenCV | 4.10.0 | https://github.com/opencv/opencv/releases (→ `C:\opencv`) |
-
-**빌드 명령** (PowerShell — 매 세션마다 환경 변수 설정 필요)
 ```powershell
 $sdkVer  = "10.0.26100.0"
 $sdkBase = "C:\Program Files (x86)\Windows Kits\10"
@@ -206,90 +146,144 @@ cmake -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release `
 cmake --build "C:/Users/kimse/capstone/antidrone/cpp/build_win" --config Release
 ```
 
----
+빌드 후 실행 폴더에 다음 DLL이 있어야 한다.
 
-### Step 5 — CUDA DLL 수동 복사 (CUDA Toolkit 미설치 대응)
-
-CUDA Toolkit 없이 PyTorch 번들 DLL을 사용:
-
-```powershell
-$src = "C:\Users\kimse\AppData\Local\Programs\Python\Python311\Lib\site-packages\torch\lib"
-$dst = "C:\Users\kimse\capstone\antidrone\cpp\build_win"
-
-# 복사한 DLL 목록
-cudart64_12.dll, cublas64_12.dll, cublasLt64_12.dll
-cudnn64_9.dll, cudnn_ops64_9.dll, cudnn_graph64_9.dll
-cudnn_cnn64_9.dll, cudnn_adv64_9.dll, cudnn_heuristic64_9.dll
-cudnn_engines_precompiled64_9.dll, cudnn_engines_runtime_compiled64_9.dll
-cufft64_11.dll, cufftw64_11.dll
+```text
+onnxruntime.dll
+onnxruntime_providers_cuda.dll
+onnxruntime_providers_shared.dll
+opencv_world4100.dll
+cudart64_12.dll
+cublas64_12.dll
+cublasLt64_12.dll
+cudnn64_9.dll
+cudnn_ops64_9.dll
+cudnn_graph64_9.dll
+cudnn_cnn64_9.dll
+cudnn_adv64_9.dll
+cudnn_heuristic64_9.dll
+cudnn_engines_precompiled64_9.dll
+cudnn_engines_runtime_compiled64_9.dll
+cufft64_11.dll
+cufftw64_11.dll
 ```
 
 ---
 
-## 4. 실행 방법
+## 5. 실행 검증 절차
 
-### detector_viewer (카메라 + YOLO 드론 탐지)
-```bat
+실행 위치:
+
+```powershell
 cd C:\Users\kimse\capstone\antidrone\cpp\build_win
+```
+
+### 5.1 기본 모델 CUDA 검증
+
+```powershell
 .\detector_viewer.exe
 ```
 
-**옵션**
-```bat
-.\detector_viewer.exe --camera 0          # 카메라 인덱스 (기본 0)
-.\detector_viewer.exe --conf 0.3          # 컨피던스 임계값 (기본 0.25)
-.\detector_viewer.exe --device CPU        # CPU 강제 (기본 CUDA)
-.\detector_viewer.exe --model <경로>      # 모델 경로 직접 지정
-```
+정상 로그 예시:
 
-**종료:** `Q` 또는 `ESC`
-
-### tracking_viewer (카메라 + 추적)
-```bat
-.\tracking_viewer.exe
-```
-
-### ptcamera_tracker (전체 시스템)
-```bat
-.\ptcamera_tracker.exe --serial-port COM4 --baud 256000 --enable-motor
-```
-
----
-
-## 5. 동작 확인 로그
-
-```
-[YoloDetector] 모델: "...\best.onnx"
-[YoloDetector] 디바이스: CUDA          ← RTX 3050 CUDA 활성화 확인
+```text
+[YoloDetector] 모델: "...best.onnx"
+[YoloDetector] 디바이스: CUDA
 [YoloDetector] 입력 크기: 640x640
-Model: "...\best.onnx"
 Inference device: CUDA
 ```
 
----
+### 5.2 새 모델 CUDA 검증
 
-## 6. Linux 환경에서 재빌드 시 주의사항
-
-CMakeLists.txt의 `ONNXRUNTIME_DIR` 경로가 Windows 절대경로로 하드코딩되어 있음.  
-Linux에서 빌드할 경우 아래와 같이 오버라이드:
-
-```bash
-# Linux용 ONNX Runtime GPU 다운로드
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-gpu-1.20.1.tgz
-tar xf onnxruntime-linux-x64-gpu-1.20.1.tgz
-
-cmake -DONNXRUNTIME_DIR=/path/to/onnxruntime-linux-x64-gpu-1.20.1 \
-      -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4 \
-      -S cpp -B cpp/build
-cmake --build cpp/build
+```powershell
+.\detector_viewer.exe --model C:\path\to\new_model.onnx
 ```
 
+확인할 것:
+
+| 항목 | 정상 기준 |
+|------|-----------|
+| 모델 로드 | 예외 없이 실행 |
+| 디바이스 | `CUDA`로 출력 |
+| 화면 | 카메라 프레임 표시 |
+| 검출 | 박스가 튀거나 전체 화면을 덮지 않음 |
+| 종료 | `Q` 또는 `ESC`로 정상 종료 |
+
+### 5.3 CPU fallback 검증
+
+CUDA 문제와 모델 자체 문제를 분리하려면 CPU로도 실행한다.
+
+```powershell
+.\detector_viewer.exe --model C:\path\to\new_model.onnx --device CPU
+```
+
+CPU에서는 정상인데 CUDA에서만 실패하면 DLL, ONNX Runtime CUDA provider, CUDA/cuDNN 호환성을 먼저 확인한다.
+
+### 5.4 추적 앱 검증
+
+검출 앱이 정상일 때 추적 앱을 확인한다.
+
+```powershell
+.\tracking_viewer.exe --model C:\path\to\new_model.onnx
+```
+
+### 5.5 전체 시스템 검증
+
+모터 제어까지 포함해 확인할 때만 실행한다.
+
+```powershell
+.\ptcamera_tracker.exe --model C:\path\to\new_model.onnx --serial-port COM4 --baud 256000 --enable-motor
+```
+
+모터를 움직이지 않고 먼저 확인하려면 `--enable-motor`를 빼고 실행한다.
+
 ---
 
-## 7. 향후 개선 가능 사항
+## 6. 모델 변경 시 체크리스트
 
-| 항목 | 설명 |
-|------|------|
-| **FP16 최적화** | `yolo export ... half=True` → VRAM 사용량 절반, 추론 속도 향상 |
-| **TensorRT** | `onnxruntime_providers_tensorrt.dll` 이미 포함됨, `.engine` 파일 변환 시 최고 성능 |
-| **Windows 시리얼 포트** | `serial_port.cpp`에 WinAPI(`CreateFile`, `SetCommState`) 구현 추가 시 Windows에서도 FPGA 연동 가능 |
+모델을 기본 모델로 반영하기 전에 아래 순서로 확인한다.
+
+1. 새 `.pt` 모델을 ONNX로 변환한다.
+2. `detector_viewer.exe --model <새 모델 경로>`로 CUDA 실행을 확인한다.
+3. CUDA 실패 시 `--device CPU`로 모델 자체가 정상인지 분리 확인한다.
+4. 검출 박스 위치, confidence, class id가 기존 앱 기대와 맞는지 확인한다.
+5. `tracking_viewer.exe --model <새 모델 경로>`로 추적 안정성을 확인한다.
+6. 필요하면 `ptcamera_tracker.exe`를 모터 비활성 상태로 먼저 확인한다.
+7. 모든 검증이 끝난 뒤 `antidrone/models/drone_yolov8x/best.onnx`를 교체한다.
+8. 교체 후 옵션 없이 `detector_viewer.exe`를 실행해 기본 경로 로드를 확인한다.
+
+---
+
+## 7. 자주 나는 문제와 확인 위치
+
+| 증상 | 우선 확인 |
+|------|-----------|
+| `CUDA 프로바이더 초기화 실패` | `onnxruntime_providers_cuda.dll`, CUDA/cuDNN DLL이 실행 폴더에 있는지 확인 |
+| CUDA만 실패하고 CPU는 정상 | ONNX Runtime GPU 버전과 CUDA/cuDNN DLL 호환성 확인 |
+| 모델 로드 실패 | `--model` 경로, 파일명, ONNX opset, 모델 손상 여부 확인 |
+| 출력 shape 오류 | 변환된 ONNX 출력이 현재 후처리의 `[1,5,N]` 또는 `[1,N,5]` 계열인지 확인 |
+| 박스 위치가 어긋남 | 입력 크기, letterbox 방식, YOLO export 옵션 확인 |
+| 검출이 전혀 안 됨 | confidence threshold, 클래스 구성, 학습 데이터 label 순서 확인 |
+
+---
+
+## 8. 기본 실행 명령 모음
+
+```powershell
+cd C:\Users\kimse\capstone\antidrone\cpp\build_win
+
+# 기본 모델, CUDA
+.\detector_viewer.exe
+
+# 새 모델, CUDA
+.\detector_viewer.exe --model C:\path\to\new_model.onnx
+
+# 새 모델, CPU
+.\detector_viewer.exe --model C:\path\to\new_model.onnx --device CPU
+
+# 추적 검증
+.\tracking_viewer.exe --model C:\path\to\new_model.onnx
+
+# 전체 시스템, 모터 활성
+.\ptcamera_tracker.exe --model C:\path\to\new_model.onnx --serial-port COM4 --baud 256000 --enable-motor
+```

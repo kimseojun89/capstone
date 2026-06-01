@@ -3,23 +3,14 @@
 unified_gui.py  -  Anti-Drone Unified Display
 Left  : Camera feed from ptcamera_tracker (UDP 9998, JPEG)
 Right : Radar PPI   from ptcamera_tracker (UDP 9999, [RADAR] text)
-Serial: FPGA UART0 motor commands  P:±N\\n  T:±N\\n  (256000 baud)
+Control: display-only. ptcamera_tracker owns the hardware port and relays data over UDP.
 
 Usage:
-    python unified_gui.py [COM_PORT]
-    python unified_gui.py --port COM4
-    python unified_gui.py          (auto-tries COM3)
+    python unified_gui.py
 """
-import io, json, math, re, socket, sys, time
+import io, json, math, re, socket, time
 import numpy as np
 import pygame
-
-# Optional pyserial  (pip install pyserial)
-try:
-    import serial as _ser_mod
-    HAS_SERIAL = True
-except ImportError:
-    HAS_SERIAL = False
 
 # ============================================================
 #  Layout
@@ -44,13 +35,6 @@ STAR_RADIUS  = 30
 UDP_CAM_PORT   = 9998
 UDP_PPI_PORT   = 9999
 UDP_TELEM_PORT = 10000   # ptcamera_tracker → GUI 상태 표시용
-
-# ============================================================
-#  Motor serial settings
-# ============================================================
-MOTOR_BAUD         = 256000
-MOTOR_KEY_STEPS    = 30        # steps per 33 ms tick (≈ MOTOR_PAN_MAX_STEP/2)
-MOTOR_CMD_INTERVAL = 0.033     # 30 Hz — FPGA resets g_host_pan/tilt_steps each frame
 
 # ============================================================
 #  Slider
@@ -124,33 +108,11 @@ def draw_star(surf, cx, cy, color, size=14):
     pygame.draw.polygon(surf, (255, 255, 0), pts, 2)
 
 # ============================================================
-#  Motor control helpers
-# ============================================================
-def _serial_send(ser, text: str) -> bool:
-    """Send a command string over serial. Returns True on success."""
-    if ser is None:
-        return False
-    try:
-        ser.write(text.encode('ascii'))
-        return True
-    except Exception:
-        return False
-
-def send_pan(ser, steps: int) -> bool:
-    """Send  P:±N\\n  — activates AI tracking mode (FPGA: motor_update_full_host)."""
-    return _serial_send(ser, f'P:{steps:+d}\n')
-
-def send_tilt(ser, steps: int) -> bool:
-    """Send  T:±N\\n  — tilt direct steps (hybrid or AI mode)."""
-    return _serial_send(ser, f'T:{steps:+d}\n')
-
-# ============================================================
 #  Camera panel + motor control overlay
 # ============================================================
 CTRL_BAR_H = 88
 
-def render_cam(screen, font, font_s, cam_surf,
-               serial_ok, serial_port, track_info=None, motor_cooldown_left=0.0):
+def render_cam(screen, font, font_s, cam_surf, track_info=None):
     cam_area_h = WIN_H - CTRL_BAR_H
     pygame.draw.rect(screen, (10, 10, 10), (0, 0, CAM_PANEL_W, cam_area_h))
     pygame.draw.line(screen, (50, 50, 50),
@@ -179,25 +141,26 @@ def render_cam(screen, font, font_s, cam_surf,
     pygame.draw.line(screen, (0, 120, 40),
                      (0, bar_y), (CAM_PANEL_W, bar_y), 1)
 
-    # Serial status
-    if serial_ok:
-        s_col, s_txt = (0, 220, 80), f'SERIAL  {serial_port}  {MOTOR_BAUD}bps'
-    elif not HAS_SERIAL:
-        s_col, s_txt = (180, 60, 60), 'pyserial NOT INSTALLED  (pip install pyserial)'
+    # Tracker/telemetry status. The tracker process owns the hardware port; GUI never opens it.
+    if track_info:
+        enabled = track_info.get('motor_enabled', False)
+        found = track_info.get('target_found', False)
+        fps = track_info.get('fps', 0.0)
+        s_col = (0, 220, 80)
+        s_txt = f'TRACKER UDP  motor={"ON" if enabled else "OFF"}  target={"LOCK" if found else "NONE"}  fps={fps:.1f}'
     else:
-        s_col, s_txt = (200, 100, 0), f'SERIAL OFFLINE  ({serial_port})'
+        s_col, s_txt = (200, 100, 0), 'TRACKER UDP WAITING'
     screen.blit(font.render(s_txt, True, s_col), (10, bar_y + 6))
 
     # Tracking / motor status
     if track_info:
-        pan  = track_info.get('pan_steps', 0)
-        tilt = track_info.get('tilt_steps', 0)
+        bbox_ex = track_info.get('bbox_ex', 0)
+        bbox_ey = track_info.get('bbox_ey', 0)
         cx   = track_info.get('center_x', 0)
+        cy   = track_info.get('center_y', 0)
         conf = track_info.get('confidence', 0.0)
-        if motor_cooldown_left > 0:
-            m_col, m_txt = (255, 180, 0), f'MOTOR WAIT {motor_cooldown_left*1000:.0f}ms  P:{pan:+d} T:{tilt:+d}'
-        else:
-            m_col, m_txt = (0, 220, 80),  f'MOTOR READY  P:{pan:+d} T:{tilt:+d}  cx={cx:.0f}  conf={conf:.2f}'
+        m_col = (0, 220, 80) if track_info.get('target_found', False) else (120, 120, 80)
+        m_txt = f'BBOX ex={bbox_ex:+d} ey={bbox_ey:+d}  cx={cx:.0f} cy={cy:.0f}  conf={conf:.2f}'
         screen.blit(font_s.render(m_txt, True, m_col), (10, bar_y + 30))
     else:
         screen.blit(font_s.render('TRACKING: no telemetry', True, (80, 80, 80)), (10, bar_y + 30))
@@ -288,22 +251,6 @@ def render_ppi(surf, font, font_s, sliders, stars,
     for i, g in enumerate(['Click : assign star', 'R : reset', 'Q : quit']):
         surf.blit(font_s.render(g, True, (120,120,120)), (px, 615+i*20))
 
-# ============================================================
-#  Main
-# ============================================================
-def _parse_serial_port() -> str:
-    """Pick serial port from sys.argv.
-       python unified_gui.py COM4
-       python unified_gui.py --port COM4
-    """
-    args = sys.argv[1:]
-    for i, a in enumerate(args):
-        if a == '--port' and i + 1 < len(args):
-            return args[i + 1]
-        if a.upper().startswith('COM') or a.startswith('/dev/'):
-            return a
-    return 'COM3'   # default
-
 def main():
     pygame.init()
     screen = pygame.display.set_mode((WIN_W, WIN_H))
@@ -312,20 +259,8 @@ def main():
     font   = pygame.font.SysFont('consolas', 15, bold=True)
     font_s = pygame.font.SysFont('consolas', 12)
 
-    # ── Serial motor port ──────────────────────────────────
-    serial_port = _parse_serial_port()
-    ser         = None
-    serial_ok   = False
-    if HAS_SERIAL:
-        try:
-            ser = _ser_mod.Serial(serial_port, MOTOR_BAUD, timeout=0)
-            serial_ok = True
-            print(f'[OK] Motor serial: {serial_port} @ {MOTOR_BAUD} bps')
-        except Exception as e:
-            print(f'[WARN] Serial not available ({serial_port}): {e}')
-    else:
-        print('[WARN] pyserial not found — motor control disabled. '
-              'Run: pip install pyserial')
+    print('[OK] Display-only GUI. ptcamera_tracker owns the hardware port; GUI listens on UDP only.')
+
 
     # ── PPI state ──────────────────────────────────────────
     heat         = np.zeros((PPI_W, WIN_H), dtype=np.float32)
@@ -468,7 +403,7 @@ def main():
                 heat[x0:x1, y0:y1] = np.minimum(
                     255, heat[x0:x1,y0:y1] + GAUSS[kx0:kx1,ky0:ky1])
 
-        # ── Telemetry → Motor commands (Move & Re-detect, PC-side cooldown) ──
+        # ── Telemetry from ptcamera_tracker ─────────────────
         # 최신 텔레메트리 패킷만 사용 (큐 드레인)
         latest_telem = None
         try:
@@ -483,10 +418,6 @@ def main():
 
         if latest_telem:
             track_info = latest_telem
-            # motor 명령 전송은 C++ ptcamera_tracker가 serial 직접 담당
-            # (여기서 send_pan/send_tilt 하면 serial 포트 충돌 발생)
-
-        motor_cooldown_left = 0.0  # C++ 내부 관리 — GUI는 표시 전용
 
         # Star tracking
         surviving = []
@@ -500,8 +431,7 @@ def main():
         # Render
         render_ppi(ppi_surf, font, font_s, sliders, stars,
                    targets, link_status, heat, half_fov)
-        render_cam(screen, font, font_s, cam_surf,
-                   serial_ok, serial_port, track_info, motor_cooldown_left)
+        render_cam(screen, font, font_s, cam_surf, track_info)
         screen.blit(ppi_surf, (CAM_PANEL_W, 0))
         pygame.display.flip()
         clock.tick(60)

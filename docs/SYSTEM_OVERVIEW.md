@@ -26,7 +26,7 @@ C:\Users\kimse\capstone\
 │   ├── run_system.ps1               ← 통합 실행 스크립트 (진입점)
 │   ├── flash.tcl                    ← XSCT용 FPGA 플래시 스크립트
 │   ├── unified_gui.py               ← 통합 GUI (카메라 + PPI 한 창)
-│   ├── requirements-ppi.txt         ← numpy, pygame, pyserial
+│   ├── requirements-ppi.txt         ← numpy, pygame
 │   ├── .venv/                       ← Python 가상환경
 │   │
 │   ├── cpp/
@@ -138,7 +138,7 @@ cd C:\Users\kimse\capstone\antidrone
                 |
          UDP 9999 [RADAR] 텍스트
          UDP 9998  JPEG 640x360 프레임
-         UDP 10000 JSON 텔레메트리(FPS/AI/Motor/Serial)
+         UDP 10000 JSON 텔레메트리(FPS/AI/Motor/bbox)
                 |
                 v
         [unified_gui.py]
