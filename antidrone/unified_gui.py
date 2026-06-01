@@ -3,10 +3,23 @@
 unified_gui.py  -  Anti-Drone Unified Display
 Left  : Camera feed from ptcamera_tracker (UDP 9998, JPEG)
 Right : Radar PPI   from ptcamera_tracker (UDP 9999, [RADAR] text)
+Serial: FPGA UART0 motor commands  P:±N\\n  T:±N\\n  (256000 baud)
+
+Usage:
+    python unified_gui.py [COM_PORT]
+    python unified_gui.py --port COM4
+    python unified_gui.py          (auto-tries COM3)
 """
-import io, math, re, socket, sys, time
+import io, json, math, re, socket, sys, time
 import numpy as np
 import pygame
+
+# Optional pyserial  (pip install pyserial)
+try:
+    import serial as _ser_mod
+    HAS_SERIAL = True
+except ImportError:
+    HAS_SERIAL = False
 
 # ============================================================
 #  Layout
@@ -19,7 +32,7 @@ PPI_W        = 750              # radar circle area inside PPI panel
 WIN_W        = CAM_PANEL_W + PPI_PANEL_W
 WIN_H        = 700
 
-# Radar geometry (coordinates relative to PPI panel surface)
+# Radar geometry
 MAX_RANGE    = 8000
 FOV          = 120
 CX           = PPI_W // 2
@@ -28,8 +41,16 @@ MAX_PX       = 560
 MAX_STARS    = 3
 STAR_RADIUS  = 30
 
-UDP_CAM_PORT = 9998
-UDP_PPI_PORT = 9999
+UDP_CAM_PORT   = 9998
+UDP_PPI_PORT   = 9999
+UDP_TELEM_PORT = 10000   # ptcamera_tracker → GUI 상태 표시용
+
+# ============================================================
+#  Motor serial settings
+# ============================================================
+MOTOR_BAUD         = 256000
+MOTOR_KEY_STEPS    = 30        # steps per 33 ms tick (≈ MOTOR_PAN_MAX_STEP/2)
+MOTOR_CMD_INTERVAL = 0.033     # 30 Hz — FPGA resets g_host_pan/tilt_steps each frame
 
 # ============================================================
 #  Slider
@@ -54,7 +75,6 @@ class Slider:
                   (self.rect.x, self.rect.y - 18))
 
     def handle_event(self, event, x_off=0):
-        """x_off = screen x offset of the surface this slider lives on."""
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             lx = event.pos[0] - x_off
             hx = self.rect.x + int(self.rect.w * (self.value - self.lo) / (self.hi - self.lo))
@@ -104,18 +124,100 @@ def draw_star(surf, cx, cy, color, size=14):
     pygame.draw.polygon(surf, (255, 255, 0), pts, 2)
 
 # ============================================================
-#  PPI panel renderer  (draws onto a 1000x700 surface)
+#  Motor control helpers
+# ============================================================
+def _serial_send(ser, text: str) -> bool:
+    """Send a command string over serial. Returns True on success."""
+    if ser is None:
+        return False
+    try:
+        ser.write(text.encode('ascii'))
+        return True
+    except Exception:
+        return False
+
+def send_pan(ser, steps: int) -> bool:
+    """Send  P:±N\\n  — activates AI tracking mode (FPGA: motor_update_full_host)."""
+    return _serial_send(ser, f'P:{steps:+d}\n')
+
+def send_tilt(ser, steps: int) -> bool:
+    """Send  T:±N\\n  — tilt direct steps (hybrid or AI mode)."""
+    return _serial_send(ser, f'T:{steps:+d}\n')
+
+# ============================================================
+#  Camera panel + motor control overlay
+# ============================================================
+CTRL_BAR_H = 88
+
+def render_cam(screen, font, font_s, cam_surf,
+               serial_ok, serial_port, track_info=None, motor_cooldown_left=0.0):
+    cam_area_h = WIN_H - CTRL_BAR_H
+    pygame.draw.rect(screen, (10, 10, 10), (0, 0, CAM_PANEL_W, cam_area_h))
+    pygame.draw.line(screen, (50, 50, 50),
+                     (CAM_PANEL_W-1, 0), (CAM_PANEL_W-1, WIN_H), 1)
+
+    cam_y = (cam_area_h - CAM_H) // 2
+
+    if cam_surf is not None:
+        screen.blit(cam_surf, (0, cam_y))
+        sig_txt, sig_col = 'LIVE', (0, 220, 0)
+    else:
+        pygame.draw.rect(screen, (20, 20, 20), (0, cam_y, CAM_PANEL_W, CAM_H))
+        pygame.draw.rect(screen, (60, 60, 60), (0, cam_y, CAM_PANEL_W, CAM_H), 2)
+        ns = font.render('NO SIGNAL', True, (90, 90, 90))
+        screen.blit(ns, (CAM_PANEL_W//2 - ns.get_width()//2,
+                         cam_y + CAM_H//2 - ns.get_height()//2))
+        sig_txt, sig_col = 'WAITING...', (180, 60, 60)
+
+    screen.blit(font.render('CAMERA FEED', True, (0, 200, 80)), (10, cam_y - 22))
+    screen.blit(font_s.render(sig_txt, True, sig_col), (120, cam_y - 20))
+
+    # ── Motor status bar ──────────────────────────────────
+    bar_y = cam_area_h
+    pygame.draw.rect(screen, (8, 18, 8),
+                     pygame.Rect(0, bar_y, CAM_PANEL_W, CTRL_BAR_H))
+    pygame.draw.line(screen, (0, 120, 40),
+                     (0, bar_y), (CAM_PANEL_W, bar_y), 1)
+
+    # Serial status
+    if serial_ok:
+        s_col, s_txt = (0, 220, 80), f'SERIAL  {serial_port}  {MOTOR_BAUD}bps'
+    elif not HAS_SERIAL:
+        s_col, s_txt = (180, 60, 60), 'pyserial NOT INSTALLED  (pip install pyserial)'
+    else:
+        s_col, s_txt = (200, 100, 0), f'SERIAL OFFLINE  ({serial_port})'
+    screen.blit(font.render(s_txt, True, s_col), (10, bar_y + 6))
+
+    # Tracking / motor status
+    if track_info:
+        pan  = track_info.get('pan_steps', 0)
+        tilt = track_info.get('tilt_steps', 0)
+        cx   = track_info.get('center_x', 0)
+        conf = track_info.get('confidence', 0.0)
+        if motor_cooldown_left > 0:
+            m_col, m_txt = (255, 180, 0), f'MOTOR WAIT {motor_cooldown_left*1000:.0f}ms  P:{pan:+d} T:{tilt:+d}'
+        else:
+            m_col, m_txt = (0, 220, 80),  f'MOTOR READY  P:{pan:+d} T:{tilt:+d}  cx={cx:.0f}  conf={conf:.2f}'
+        screen.blit(font_s.render(m_txt, True, m_col), (10, bar_y + 30))
+    else:
+        screen.blit(font_s.render('TRACKING: no telemetry', True, (80, 80, 80)), (10, bar_y + 30))
+
+    # Key hint
+    screen.blit(font_s.render(
+        'R : Reset radar    Q : Quit',
+        True, (70, 120, 70)), (10, bar_y + 62))
+
+# ============================================================
+#  PPI panel renderer
 # ============================================================
 def render_ppi(surf, font, font_s, sliders, stars,
                targets, link_status, heat, half_fov):
     surf.fill((0, 0, 0))
 
-    # Heatmap
     hu8 = heat.astype(np.uint8)
     surf.blit(pygame.surfarray.make_surface(
         np.stack([hu8//2, hu8, hu8], axis=-1)), (0, 0))
 
-    # Distance rings & labels
     for r_mm in [2000, 4000, 6000, 8000]:
         r_px = int((r_mm / MAX_RANGE) * MAX_PX)
         rect = pygame.Rect(CX-r_px, CY-r_px, r_px*2, r_px*2)
@@ -125,13 +227,11 @@ def render_ppi(surf, font, font_s, sliders, stars,
         ly = int(CY - r_px * math.cos(half_fov))
         surf.blit(font_s.render(f'{r_mm//1000}m', True, (80,180,80)), (lx, ly))
 
-    # FOV boundary lines
     for sign in [-1, 1]:
         ex = int(CX + MAX_PX * math.sin(sign * half_fov))
         ey = int(CY - MAX_PX * math.cos(half_fov))
         pygame.draw.line(surf, (0,120,0), (CX, CY), (ex, ey), 1)
 
-    # Azimuth lines
     for deg in [-60, -30, 0, 30, 60]:
         rad = math.radians(deg)
         ex = int(CX + MAX_PX * math.sin(rad))
@@ -143,7 +243,6 @@ def render_ppi(surf, font, font_s, sliders, stars,
     pygame.draw.circle(surf, (0,255,0), (CX, CY), 5)
     surf.blit(font.render('RADAR', True, (100,200,100)), (CX+8, CY-12))
 
-    # Stars & raw targets
     for star in stars:
         sx, sy = star['pos']
         draw_star(surf, sx, sy, (255,50,50))
@@ -153,15 +252,12 @@ def render_ppi(surf, font, font_s, sliders, stars,
         pygame.draw.circle(surf, (0,255,255), (rx, ry), 5)
         surf.blit(font_s.render(f'RAW_{tid}', True, (0,255,255)), (rx+8, ry-8))
 
-    # Data panel (right 250px of ppi surface)
     px = PPI_W + 15
     pygame.draw.rect(surf, (15,15,15),
                      pygame.Rect(PPI_W, 0, PPI_PANEL_W-PPI_W, WIN_H))
     pygame.draw.line(surf, (50,50,50), (PPI_W,0), (PPI_W,WIN_H), 1)
 
-    link_col = {
-        'UDP': (0,255,0), 'OFFLINE': (255,0,0)
-    }.get(link_status, (255,0,0))
+    link_col = {'UDP': (0,255,0), 'OFFLINE': (255,0,0)}.get(link_status, (255,0,0))
     surf.blit(font.render(f'LINK: {link_status}', True, link_col), (px, 10))
     surf.blit(font.render('CONTROL', True, (0,200,80)), (px, 40))
 
@@ -193,36 +289,21 @@ def render_ppi(surf, font, font_s, sliders, stars,
         surf.blit(font_s.render(g, True, (120,120,120)), (px, 615+i*20))
 
 # ============================================================
-#  Camera panel renderer  (draws directly on screen, x=0..CAM_PANEL_W)
-# ============================================================
-def render_cam(screen, font, font_s, cam_surf):
-    pygame.draw.rect(screen, (10,10,10), (0, 0, CAM_PANEL_W, WIN_H))
-    pygame.draw.line(screen, (50,50,50),
-                     (CAM_PANEL_W-1, 0), (CAM_PANEL_W-1, WIN_H), 1)
-
-    cam_y = (WIN_H - CAM_H) // 2   # vertically center the frame
-
-    if cam_surf is not None:
-        screen.blit(cam_surf, (0, cam_y))
-        sig_txt, sig_col = 'LIVE', (0, 220, 0)
-    else:
-        pygame.draw.rect(screen, (20,20,20), (0, cam_y, CAM_PANEL_W, CAM_H))
-        pygame.draw.rect(screen, (60,60,60), (0, cam_y, CAM_PANEL_W, CAM_H), 2)
-        ns = font.render('NO SIGNAL', True, (90,90,90))
-        screen.blit(ns, (CAM_PANEL_W//2 - ns.get_width()//2,
-                         cam_y + CAM_H//2 - ns.get_height()//2))
-        sig_txt, sig_col = 'WAITING...', (180, 60, 60)
-
-    # Status bar below frame
-    bar_y = cam_y + CAM_H + 8
-    screen.blit(font.render('CAMERA FEED', True, (0,200,80)), (10, bar_y))
-    screen.blit(font_s.render(sig_txt, True, sig_col), (10, bar_y + 20))
-    screen.blit(font.render('Anti-Drone Unified', True, (140,140,140)),
-                (10, WIN_H - 25))
-
-# ============================================================
 #  Main
 # ============================================================
+def _parse_serial_port() -> str:
+    """Pick serial port from sys.argv.
+       python unified_gui.py COM4
+       python unified_gui.py --port COM4
+    """
+    args = sys.argv[1:]
+    for i, a in enumerate(args):
+        if a == '--port' and i + 1 < len(args):
+            return args[i + 1]
+        if a.upper().startswith('COM') or a.startswith('/dev/'):
+            return a
+    return 'COM3'   # default
+
 def main():
     pygame.init()
     screen = pygame.display.set_mode((WIN_W, WIN_H))
@@ -231,7 +312,22 @@ def main():
     font   = pygame.font.SysFont('consolas', 15, bold=True)
     font_s = pygame.font.SysFont('consolas', 12)
 
-    # PPI state
+    # ── Serial motor port ──────────────────────────────────
+    serial_port = _parse_serial_port()
+    ser         = None
+    serial_ok   = False
+    if HAS_SERIAL:
+        try:
+            ser = _ser_mod.Serial(serial_port, MOTOR_BAUD, timeout=0)
+            serial_ok = True
+            print(f'[OK] Motor serial: {serial_port} @ {MOTOR_BAUD} bps')
+        except Exception as e:
+            print(f'[WARN] Serial not available ({serial_port}): {e}')
+    else:
+        print('[WARN] pyserial not found — motor control disabled. '
+              'Run: pip install pyserial')
+
+    # ── PPI state ──────────────────────────────────────────
     heat         = np.zeros((PPI_W, WIN_H), dtype=np.float32)
     stars        = []
     targets      = {}
@@ -240,15 +336,15 @@ def main():
     ppi_surf     = pygame.Surface((PPI_PANEL_W, WIN_H))
     pattern      = r'\[RADAR\]\s*T(\d+):\((-?\d+),(-?\d+)\)mm'
 
-    px_slider = PPI_W + 15   # x within ppi_surf
+    px_slider = PPI_W + 15
     sliders   = [Slider(px_slider, 90, 200,
                         'Afterglow Decay', 0.80, 0.999, 0.985)]
     decay_s   = sliders[0]
 
-    # Camera state
-    cam_surf     = None
+    # ── Camera state ───────────────────────────────────────
+    cam_surf = None
 
-    # UDP sockets
+    # ── UDP sockets ────────────────────────────────────────
     ppi_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     ppi_sock.bind(('127.0.0.1', UDP_PPI_PORT))
     ppi_sock.setblocking(False)
@@ -257,26 +353,38 @@ def main():
     cam_sock.bind(('127.0.0.1', UDP_CAM_PORT))
     cam_sock.setblocking(False)
 
-    print(f'[OK] UDP camera:{UDP_CAM_PORT}  radar:{UDP_PPI_PORT}  window:{WIN_W}x{WIN_H}')
+    telem_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    telem_sock.bind(('127.0.0.1', UDP_TELEM_PORT))
+    telem_sock.setblocking(False)
 
+    print(f'[OK] UDP camera:{UDP_CAM_PORT}  radar:{UDP_PPI_PORT}  '
+          f'telemetry:{UDP_TELEM_PORT}  window:{WIN_W}x{WIN_H}')
+
+    track_info = {}    # 최신 텔레메트리 (UI 표시용)
+
+    # ── Main loop ──────────────────────────────────────────
     while True:
         now = time.time()
 
-        # -- Events ------------------------------------------
+        # Events
         for event in pygame.event.get():
             if (event.type == pygame.QUIT or
                     (event.type == pygame.KEYDOWN and event.key == pygame.K_q)):
-                ppi_sock.close(); cam_sock.close()
-                pygame.quit(); sys.exit()
+                if ser:
+                    ser.close()
+                ppi_sock.close()
+                cam_sock.close()
+                telem_sock.close()
+                pygame.quit()
+                sys.exit()
 
             if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
-                stars.clear(); heat[:] = 0
+                stars.clear()
+                heat[:] = 0
 
-            # Sliders live on ppi_surf, offset by CAM_PANEL_W on screen
             for s in sliders:
                 s.handle_event(event, x_off=CAM_PANEL_W)
 
-            # Star click (inside PPI circle area)
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mx, my = event.pos
                 ppi_x = mx - CAM_PANEL_W
@@ -285,12 +393,12 @@ def main():
                         stars.remove(star) or True
                         for star in stars[:]
                         if math.hypot(ppi_x - star['pos'][0],
-                                      my  - star['pos'][1]) < STAR_RADIUS
+                                      my   - star['pos'][1]) < STAR_RADIUS
                     )
                     if not removed and len(stars) < MAX_STARS:
                         stars.append({'pos': (ppi_x, my), 'id': len(stars)+1})
 
-        # -- Camera frame receive -----------------------------
+        # Camera frame
         try:
             while True:
                 data, _ = cam_sock.recvfrom(70000)
@@ -302,7 +410,7 @@ def main():
         except BlockingIOError:
             pass
 
-        # -- Radar data receive -------------------------------
+        # Radar data
         def process_radar(line):
             m = re.search(pattern, line)
             if not m:
@@ -338,11 +446,10 @@ def main():
         elif (now - max((t['time'] for t in targets.values()), default=0)) > 3.0:
             link_status = 'OFFLINE'
 
-        # Stale target cleanup
         for tid in [k for k, t in targets.items() if now - t['time'] > 0.5]:
             del targets[tid]
 
-        # -- Heatmap -----------------------------------------
+        # Heatmap
         heat *= decay_s.value
         heat -= 2.0
         np.maximum(heat, 0, out=heat)
@@ -361,7 +468,27 @@ def main():
                 heat[x0:x1, y0:y1] = np.minimum(
                     255, heat[x0:x1,y0:y1] + GAUSS[kx0:kx1,ky0:ky1])
 
-        # -- Star tracking ------------------------------------
+        # ── Telemetry → Motor commands (Move & Re-detect, PC-side cooldown) ──
+        # 최신 텔레메트리 패킷만 사용 (큐 드레인)
+        latest_telem = None
+        try:
+            while True:
+                data, _ = telem_sock.recvfrom(4096)
+                try:
+                    latest_telem = json.loads(data.decode('utf-8', errors='ignore'))
+                except Exception:
+                    pass
+        except BlockingIOError:
+            pass
+
+        if latest_telem:
+            track_info = latest_telem
+            # motor 명령 전송은 C++ ptcamera_tracker가 serial 직접 담당
+            # (여기서 send_pan/send_tilt 하면 serial 포트 충돌 발생)
+
+        motor_cooldown_left = 0.0  # C++ 내부 관리 — GUI는 표시 전용
+
+        # Star tracking
         surviving = []
         for star in stars:
             nx, ny = heat_centroid(heat, star['pos'][0], star['pos'][1])
@@ -370,10 +497,11 @@ def main():
                 surviving.append(star)
         stars = surviving
 
-        # -- Render ------------------------------------------
+        # Render
         render_ppi(ppi_surf, font, font_s, sliders, stars,
                    targets, link_status, heat, half_fov)
-        render_cam(screen, font, font_s, cam_surf)
+        render_cam(screen, font, font_s, cam_surf,
+                   serial_ok, serial_port, track_info, motor_cooldown_left)
         screen.blit(ppi_surf, (CAM_PANEL_W, 0))
         pygame.display.flip()
         clock.tick(60)

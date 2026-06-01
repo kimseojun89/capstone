@@ -102,7 +102,7 @@ cd C:\Users\kimse\capstone\antidrone
 
 [2/3] .venv\Scripts\python.exe unified_gui.py
       → 통합 GUI 창 오픈 (1700x700)
-      → UDP 9998, 9999 포트 바인딩
+      → UDP 9998, 9999, 10000 포트 바인딩
 
 [3/3] ptcamera_tracker.exe --serial-port COM4 --baud 256000
                             --camera 1 --enable-motor
@@ -141,6 +141,7 @@ cd C:\Users\kimse\capstone\antidrone
                 |
          UDP 9999 [RADAR] 텍스트
          UDP 9998  JPEG 640x360 프레임
+         UDP 10000 JSON 텔레메트리(FPS/AI/Motor/Serial)
                 |
                 v
         [unified_gui.py]
@@ -149,28 +150,31 @@ cd C:\Users\kimse\capstone\antidrone
         |  (700x700)       |    (1000x700)        |
         |                  |                      |
         |  JPEG 수신       |  히트맵 + 거리링      |
-        |  YOLO 오버레이   |  별(★) 타겟 추적     |
-        |  LIVE / NO SIG   |  LINK: UDP (초록)    |
+        |  YOLO 오버레이   |  trail + 선택 타겟   |
+        |  AI/Motor 상태   |  RADAR 상태/HZ       |
         +------------------+---------------------+
                    1700 x 700 단일 창
 ```
 
 ---
 
-## 5. FPGA 모터 제어 상태머신
+## 5. FPGA 모터 제어 상태머신 (`ps_main.cpp:944~973`)
 
 > 정본: [motor_control_changes.md](motor_control_changes.md). **Pan은 항상 안테나(레이더) 방위각 전용**,
-> Tilt만 상황(카메라 퓨전 여부)에 따라 분기. 레이더 Pan은 증분 PID가 아닌 **절대 위치 SET**(무한 회전 방지).
+> Tilt만 상황(카메라 퓨전 여부)에 따라 분기. **Pan/Tilt 모두 증분 PID**(`g_motor_abs_pan += dpan`).
 
 | 모드 | 조건 | Pan 소스 | Tilt 소스 |
 |---|---|---|---|
-| **AI 트래킹** | `g_host_pan_steps != 0` | PC `P:±N` (직접 스텝) | PC `T:±N` (직접 스텝) |
-| **퓨전** | `rvc > 0` & `fi >= 0` | 안테나 방위각 (절대 위치) | 카메라 BBox `cy` PID |
-| **레이더 단독** | `rvc > 0` & `fi < 0` | 안테나 방위각 (절대 위치) | PC `T:±N` 명령 |
+| **AI 트래킹** | `g_host_pan_steps != 0` & `cooldown==0` | PC `P:±N` (직접 스텝) | PC `T:±N` (직접 스텝) |
+| **AI 잠금** | `cooldown>0` 또는 `ai_lock_frames>0` | — (현재 위치 유지, 레이더 차단) | — |
+| **퓨전** | `fi >= 0` | 레이더 방위각 PID | 카메라 BBox `cy` PID |
+| **레이더 단독** | `rvc > 0` & `fi < 0` | 레이더 방위각 PID | PC `T:±N` 명령 |
 | **표적 없음** | `rvc == 0` | — (마지막 위치 유지) | — |
 
-> `rang`(레이더 각도, 0.1도 단위)을 `g_motor_abs_pan = -(rang/10 × 4096/360)`로 절대 변환(±90도 클램프).
-> 목표 각도 도달 후 자동 정지. AI 트래킹 모드에서만 PC가 Pan까지 직접 제어.
+> **Pan은 절대 SET이 아니라 증분 PID.** 레이더 각도 `rang`(0.1도)을 LP필터(α=0.4)로 평활한 뒤
+> `angle_to_px(rang)` 픽셀 오차를 `motor_update`/`motor_update_hybrid`의 PID에 입력한다(`KP=1.5, KD=0`).
+> AI 명령 후에는 `cooldown`/`ai_lock_frames` 동안 레이더 오버라이드를 차단해 PC 추적 연속성을 보장.
+> (구버전 문서의 `g_motor_abs_pan = -(rang/10×4096/360)` 절대 변환 서술은 현재 코드에 없음.)
 
 ---
 
@@ -196,6 +200,19 @@ cd C:\Users\kimse\capstone\antidrone
 |---|---|---|
 | 9999 | tracker → unified_gui | `[RADAR]` 텍스트 라인 |
 | 9998 | tracker → unified_gui | JPEG 640×360 카메라 프레임 |
+| 10000 | tracker → unified_gui | JSON 텔레메트리(FPS, target lock, confidence, pan/tilt step, motor/serial 상태) |
+
+### GUI 단독 점검
+
+보드·카메라·COM4 없이 GUI 수신/렌더링만 확인할 때는 `scripts/gui_udp_sim.py`를 사용한다.
+
+```powershell
+# 터미널 1
+.\antidrone\.venv\Scripts\python.exe .\antidrone\unified_gui.py
+
+# 터미널 2
+.\antidrone\.venv\Scripts\python.exe .\scripts\gui_udp_sim.py
+```
 
 ---
 
@@ -234,10 +251,11 @@ cmake --build build_win --target ptcamera_tracker
 | 시리얼 포트 | COM4 | `run_system.ps1` |
 | YOLO 모델 | `models/drone_yolov8x/best.onnx` | `settings.cpp` |
 | 추론 장치 | CUDA (RTX 3050) | `settings.hpp` |
-| 모터 속도 딜레이 | 200 (154°/s; 탈조 시 300으로) | `ps_main.cpp:118` |
-| 모터 PID KP / MAX_STEP | KP=2.0 / 58 | `ps_main.cpp:100,107` |
-| Pan deadband | 35 px | `ps_main.cpp`, `settings.hpp` |
-| Tilt deadband | 35 px | `ps_main.cpp`, `settings.hpp` |
+| 모터 속도 딜레이 | 200 (154°/s; 탈조 시 300으로) | `ps_main.cpp:120` |
+| 모터 PID KP / KD / MAX_STEP | KP=1.5 / KD=0.0 / 58 | `ps_main.cpp:101,102,108` |
+| 레이더 rang LP필터 | α=0.4 (지터 억제) | `ps_main.cpp:922` |
+| Pan deadband | 35 px | `ps_main.cpp:103`, `settings.hpp` |
+| Tilt deadband | 35 px | `ps_main.cpp:104`, `settings.hpp` |
 | 레이더 최대 거리 | 8000 mm | `unified_gui.py` |
 | PPI FOV | 120 도 | `unified_gui.py` |
 

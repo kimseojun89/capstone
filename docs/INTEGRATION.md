@@ -8,8 +8,11 @@
 
 | 축 | 제어 소스 | 경로 |
 |---|---|---|
-| **Pan** | 안테나/레이더 방위각 | UART1 → ps_main.cpp PID |
-| **Tilt** | Windows 카메라 YOLO 탐지 | UART0 (COM4) → ps_main.cpp 직접 스텝 |
+| **Pan** | 안테나/레이더 방위각 | UART1 → ps_main.cpp 증분 PID (`angle_to_px(rang)`) |
+| **Tilt** | 퓨전: 카메라 BBox cy PID / 레이더단독: PC `T:` 명령 | UART0 (COM4) → ps_main.cpp |
+
+> 전체 4-모드(AI추적·AI잠금·퓨전·레이더단독) 분기는 [SYSTEM_OVERVIEW.md §5](SYSTEM_OVERVIEW.md) /
+> [motor_control_changes.md](motor_control_changes.md) 참고. 본 문서는 통합 작업의 변경 이력 위주.
 
 ```
 [Radar/Antenna] --UART1 256000bps--> [FPGA ps_main.cpp]
@@ -33,18 +36,24 @@
 
 ```
 [FPGA UART0] --COM4---> [ptcamera_tracker.exe]
-                              |          |
-                         tilt 명령 전송  [RADAR] 라인 추출
-                         "T:±N\n"        |
-                                    UDP:9999
-                                         |
-                                   [ppi_viewer.py]
-                                   레이더 PPI 표시
+                              |          |             |
+                         모터 명령 전송  [RADAR] 추출  카메라/AI 상태
+                         "P:/T:±N\n"     |             |
+                                    UDP:9999       UDP:9998 / 10000
+                                         |             |
+                                   [unified_gui.py]
+                                   카메라 + PPI + 텔레메트리 표시
 ```
 
 **COM4 독점 구조**: `ptcamera_tracker.exe`가 COM4를 단독으로 열고,  
 FPGA 로그에서 `[RADAR]` 라인을 추출해 UDP 127.0.0.1:9999으로 중계한다.  
-`ppi_viewer.py`는 시리얼 대신 UDP를 수신하므로 포트 충돌이 없다.
+`unified_gui.py`는 시리얼을 열지 않고 UDP만 수신하므로 포트 충돌이 없다.
+
+| UDP 포트 | 방향 | 내용 |
+|---|---|---|
+| 9998 | tracker → unified_gui | 오버레이가 그려진 카메라 프레임 |
+| 9999 | tracker → unified_gui | `[RADAR]` 텍스트 라인 |
+| 10000 | tracker → unified_gui | JSON 텔레메트리(FPS, AI lock, confidence, pan/tilt command, motor/serial 상태) |
 
 ---
 
@@ -150,6 +159,8 @@ int serialBaud = 256000;  // 115200 → 256000
 - **시리얼 항상 오픈** (모터 비활성 시에도 레이더 릴레이를 위해)
 - **UDP 소켓 초기화** → 127.0.0.1:9999
 - 메인 루프에서 `readAvailable` 호출 → `[RADAR]` 라인 추출 → UDP sendto
+- 카메라 오버레이 프레임 → UDP 127.0.0.1:9998
+- tracker 상태 JSON → UDP 127.0.0.1:10000
 - tilt 전송: `sendTiltCommand(tiltSteps)` (`sendStepperCommand` 대체)
 - 종료 시 소켓 정리 (`closesocket` / `WSACleanup`)
 
@@ -172,9 +183,10 @@ endif()
 > 아래 UDP 릴레이 동작은 `unified_gui.py`에 동일하게 구현되어 있다.
 
 - `BAUD_RATE`: 115200 → 256000
-- **UDP 소켓** (primary): `bind(127.0.0.1:9999)`, non-blocking
-- **시리얼** (fallback): COM4 직접 연결 실패해도 UDP로 동작
-- LINK 상태 표시: `UDP` (초록) / `UART` (하늘) / `OFFLINE` (빨강)
+- **UDP 소켓**: `9998`(카메라), `9999`(레이더), `10000`(tracker 텔레메트리), non-blocking
+- **시리얼 직접 연결 없음**: COM4는 `ptcamera_tracker.exe`가 독점
+- 상태 표시: 카메라/레이더/AI/모터를 `LIVE`, `STALE`, `OFFLINE`, `LOCK` 등으로 분리
+- PPI 기능: heatmap, target trail, 타겟 클릭 선택, `D` 디버그 로그 토글
 
 ---
 
@@ -207,7 +219,7 @@ con
 .\run_system.ps1 -SerialPort COM4 -EnableMotor
 ```
 
-순서: FPGA 플래시 → ppi_viewer.py 실행 → ptcamera_tracker.exe 실행
+순서: FPGA 플래시 → unified_gui.py 실행 → ptcamera_tracker.exe 실행
 
 ---
 
@@ -236,9 +248,16 @@ cmake --build build_win --target ptcamera_tracker
 
 1. Tera Term / PuTTY → COM4, **256000 bps** 확인
 2. `.\run_system.ps1 -Flash -SerialPort COM4 -EnableMotor` 실행
-3. PPI 뷰어 상단 **LINK: UDP** 표시 확인
+3. 통합 GUI 상단 **CAM/RADAR/AI/MOTOR** 상태 표시 확인
 4. 카메라 화면에서 드론이 아래로 이동 → tilt 모터 상향 추종 확인
 5. 레이더 신호 방향 변화 → pan 모터 추종 확인
+
+### 보드 없이 GUI 점검
+
+```powershell
+.\antidrone\.venv\Scripts\python.exe .\antidrone\unified_gui.py
+.\antidrone\.venv\Scripts\python.exe .\scripts\gui_udp_sim.py
+```
 
 ---
 

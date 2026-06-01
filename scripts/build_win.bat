@@ -1,5 +1,14 @@
 @echo off
-call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" > nul 2>&1
+setlocal
+
+set "VCVARS=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+if exist "%VCVARS%" goto HaveVS
+echo [FAIL] Visual Studio Build Tools vcvars64.bat not found:
+echo        %VCVARS%
+exit /b 1
+
+:HaveVS
+call "%VCVARS%" > nul 2>&1
 
 set "WINSDK_VER=10.0.26100.0"
 set "WINSDK_BIN=C:\Program Files (x86)\Windows Kits\10\bin\%WINSDK_VER%\x64"
@@ -13,37 +22,45 @@ set "PATH=%PATH%;%WINSDK_BIN%"
 set "LIB=%LIB%;%WINSDK_LIB_UM%;%WINSDK_LIB_UCRT%"
 set "INCLUDE=%INCLUDE%;%WINSDK_INCLUDE_UM%;%WINSDK_INCLUDE_UCRT%;%WINSDK_INCLUDE_SHARED%"
 
-set "BUILD_DIR=C:\Users\kimse\capstone\antidrone\cpp\build_win"
+set "ROOT=%~dp0.."
+for %%I in ("%ROOT%") do set "ROOT=%%~fI"
+set "CPP_DIR=%ROOT%\antidrone\cpp"
+set "BUILD_DIR=%CPP_DIR%\build_win"
 set "CMAKE=C:\Program Files\CMake\bin\cmake.exe"
+set "ONNXRUNTIME_DIR=%ROOT%\onnxruntime-gpu\onnxruntime-win-x64-gpu-1.20.1"
 
-rmdir /s /q "%BUILD_DIR%" 2>nul
-mkdir "%BUILD_DIR%"
+if exist "%CMAKE%" goto HaveCMake
+echo [FAIL] CMake not found:
+echo        %CMAKE%
+exit /b 1
+
+:HaveCMake
+
+if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 
 echo [1/2] CMake configure...
 "%CMAKE%" -G "NMake Makefiles" ^
     -DCMAKE_BUILD_TYPE=Release ^
     "-DOpenCV_DIR=C:/opencv/build/x64/vc16/lib" ^
-    "-DONNXRUNTIME_DIR=C:/Users/kimse/capstone/onnxruntime-gpu/onnxruntime-win-x64-gpu-1.20.1" ^
-    -S "C:/Users/kimse/capstone/antidrone/cpp" ^
+    "-DONNXRUNTIME_DIR=%ONNXRUNTIME_DIR:\=/%" ^
+    -S "%CPP_DIR%" ^
     -B "%BUILD_DIR%"
 
 if %ERRORLEVEL% NEQ 0 (
-    echo CMake configure 실패!
-    pause
+    echo CMake configure failed.
     exit /b 1
 )
 
 echo [2/2] Build...
-"%CMAKE%" --build "%BUILD_DIR%" --config Release -- -j4
+"%CMAKE%" --build "%BUILD_DIR%" --target ptcamera_tracker --config Release
 
 if %ERRORLEVEL% NEQ 0 (
-    echo Build 실패!
-    pause
+    echo Build failed.
     exit /b 1
 )
 
 echo.
 echo ============================
-echo  빌드 완료!
-echo  실행 파일 위치: %BUILD_DIR%
+echo  Build complete.
+echo  Output: %BUILD_DIR%
 echo ============================

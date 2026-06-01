@@ -105,7 +105,7 @@ Kalman HLS IP 내부 `DT = 0.1f` (10Hz 기준)이나, 현재 메인 루프는 `u
 | 0x00 | ap_ctrl (AP_START bit0, AP_DONE bit1, AP_IDLE bit2) |
 | 0x10 | target_pan (절대 스텝) |
 | 0x18 | target_tilt (절대 스텝) |
-| 0x20 | speed_delay (µs/step, 기본 2000) |
+| 0x20 | speed_delay (hw_delay 루프 카운트 — µs 아님; ps_main 기본 200) |
 
 ---
 

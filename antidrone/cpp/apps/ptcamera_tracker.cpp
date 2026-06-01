@@ -153,14 +153,22 @@ int main(int argc, char** argv) {
 
         // Camera frame stream -> unified GUI (UDP 9998)
 #ifdef _WIN32
-        SOCKET camSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        SOCKET camSock   = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        SOCKET telemSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 #else
-        int camSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        int camSock   = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        int telemSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 #endif
         sockaddr_in camDest = {};
         camDest.sin_family = AF_INET;
         camDest.sin_port   = htons(9998);
         inet_pton(AF_INET, "127.0.0.1", &camDest.sin_addr);
+
+        // Telemetry -> unified GUI (UDP 10000, JSON)
+        sockaddr_in telemDest = {};
+        telemDest.sin_family = AF_INET;
+        telemDest.sin_port   = htons(10000);
+        inet_pton(AF_INET, "127.0.0.1", &telemDest.sin_addr);
 
         cv::VideoCapture cap(settings.cameraIndex);
         if (!cap.isOpened()) {
@@ -184,8 +192,8 @@ int main(int argc, char** argv) {
 
         cv::namedWindow("ptcamera_tracker", cv::WINDOW_NORMAL);
 
-        auto last = std::chrono::steady_clock::now();
-        auto lastSend = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+        auto last            = std::chrono::steady_clock::now();
+        auto nextSendAllowed = std::chrono::steady_clock::now();  // 처음부터 전송 가능
         double fps = 0.0;
         std::vector<std::string> statusLines;
         std::string relayBuf;
@@ -232,15 +240,16 @@ int main(int argc, char** argv) {
             statusLines.clear();
 
             if (motorEnabled) {
-                const double sinceSend = std::chrono::duration<double>(now - lastSend).count();
-                if (sinceSend >= settings.sendInterval &&
+                // Move & Re-detect: 이동 완료 시간 기반 동적 쿨다운
+                // - 명령 전송 후 모터 실제 이동 시간 + 1프레임 안정화 대기
+                // - 대기 중엔 PID 상태도 리셋하여 다음 명령은 최신 bbox 기준 fresh start
+                if (now >= nextSendAllowed &&
                     (telemetry.command.panSteps != 0 || telemetry.command.tiltSteps != 0)) {
                     if (!serial.isOpen()) {
                         statusLines.push_back("serial not open, motor off");
                     } else {
                         std::string errMsg;
                         bool ok = true;
-                        // Send pan when YOLO has a lock -> activates AI tracking mode on FPGA
                         if (telemetry.targetFound && telemetry.command.panSteps != 0) {
                             ok = serial.sendPanCommand(telemetry.command.panSteps, &errMsg);
                         }
@@ -248,7 +257,17 @@ int main(int argc, char** argv) {
                             ok = serial.sendTiltCommand(telemetry.command.tiltSteps, &errMsg);
                         }
                         if (ok) {
-                            lastSend = now;
+                            // 동적 쿨다운: max(이동시간 + 안정화, sendInterval 최솟값)
+                            // MOTOR_SPEED_DELAY=200 → 0.57ms/step
+                            constexpr double STEP_SEC   = 0.00057;
+                            constexpr double STABLE_SEC = 0.033;   // 1프레임 안정화 여유
+                            const double moveSec =
+                                std::abs(telemetry.command.panSteps) * STEP_SEC;
+                            const double cooldown =
+                                std::max(moveSec + STABLE_SEC, settings.sendInterval);
+                            nextSendAllowed =
+                                now + std::chrono::duration<double>(cooldown);
+                            control.reset();  // PID 리셋: 다음 명령은 최신 bbox 기준으로 계산
                         } else {
                             statusLines.push_back(errMsg);
                         }
@@ -283,6 +302,31 @@ int main(int argc, char** argv) {
                 }
             }
 
+            // Telemetry JSON → unified GUI (UDP 10000)
+            {
+                float cx = 0.0f, cy = 0.0f, conf = 0.0f;
+                if (result.target) {
+                    cx   = result.target->center.x;
+                    cy   = result.target->center.y;
+                    conf = result.target->confidence;
+                }
+                char telemJson[256];
+                const int n = snprintf(telemJson, sizeof(telemJson),
+                    "{\"motor_enabled\":%s,\"target_found\":%s,"
+                    "\"pan_steps\":%d,\"tilt_steps\":%d,"
+                    "\"center_x\":%.1f,\"center_y\":%.1f,"
+                    "\"confidence\":%.3f,\"fps\":%.1f}",
+                    motorEnabled ? "true" : "false",
+                    telemetry.targetFound ? "true" : "false",
+                    telemetry.command.panSteps, telemetry.command.tiltSteps,
+                    cx, cy, conf, static_cast<float>(fps));
+                if (n > 0 && n < static_cast<int>(sizeof(telemJson))) {
+                    sendto(telemSock, telemJson, n, 0,
+                           reinterpret_cast<const sockaddr*>(&telemDest),
+                           sizeof(telemDest));
+                }
+            }
+
             const int key = cv::waitKey(1) & 0xff;
             if (key == 27 || key == 'q') {
                 break;
@@ -298,12 +342,14 @@ int main(int argc, char** argv) {
         }
 
 #ifdef _WIN32
-        if (udpSock  != INVALID_SOCKET) closesocket(udpSock);
-        if (camSock  != INVALID_SOCKET) closesocket(camSock);
+        if (udpSock   != INVALID_SOCKET) closesocket(udpSock);
+        if (camSock   != INVALID_SOCKET) closesocket(camSock);
+        if (telemSock != INVALID_SOCKET) closesocket(telemSock);
         WSACleanup();
 #else
-        if (udpSock >= 0) ::close(udpSock);
-        if (camSock >= 0) ::close(camSock);
+        if (udpSock   >= 0) ::close(udpSock);
+        if (camSock   >= 0) ::close(camSock);
+        if (telemSock >= 0) ::close(telemSock);
 #endif
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

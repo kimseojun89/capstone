@@ -32,7 +32,7 @@ struct TrackerSettings {
     std::string visualTracker = "csrt";
     int visualTrackerMaxMissingFrames = 45;
 
-    double sendInterval = 0.12;
+    double sendInterval = 0.066;  // 2프레임(66ms) 최소 간격; 실제 쿨다운은 이동 시간에 따라 동적 계산
     int panMinStep = 8;
     int tiltMinStep = 8;
     int panMaxStep = 48;

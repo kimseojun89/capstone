@@ -26,8 +26,9 @@ capstone/
 │   ├── motor_porting_guide.md 모터 핀맵·속도 튜닝
 │   ├── motor_control_changes.md 모터 제어 수정 이력(정본)
 │   └── OPEN_ISSUES.md         미해결 항목 통합 ★
-├── scripts/               ← 빌드 도구 (절대경로 기반, 위치 무관)
+├── scripts/               ← 빌드·점검 도구
 │   ├── build_win.bat          호스트 C++ 앱 빌드 (Windows)
+│   ├── gui_udp_sim.py         통합 GUI용 가짜 UDP 송신기 (보드 없이 화면 점검)
 │   ├── run_build.bat          FPGA 앱 빌드 (Vitis pyesw)
 │   ├── build_app.{py,tcl}     FPGA 앱 빌드 (대체 방식)
 │   └── recreate_platform.tcl  Vitis 플랫폼 XSA 재생성
@@ -61,7 +62,17 @@ cd C:\Users\kimse\capstone\antidrone
 .\run_system.ps1 -SerialPort COM4 -EnableMotor
 ```
 
-실행 순서: FPGA 플래시 → `unified_gui.py`(UDP 9998/9999) → `ptcamera_tracker.exe`(COM4 점유, 레이더 릴레이).
+실행 순서: FPGA 플래시 → `unified_gui.py`(UDP 9998/9999/10000) → `ptcamera_tracker.exe`(COM4 점유, 레이더 릴레이).
+
+GUI만 보드 없이 점검하려면 터미널 2개에서 아래처럼 실행한다.
+
+```powershell
+# 1) GUI
+.\antidrone\.venv\Scripts\python.exe .\antidrone\unified_gui.py
+
+# 2) 가짜 카메라/레이더/텔레메트리 UDP
+.\antidrone\.venv\Scripts\python.exe .\scripts\gui_udp_sim.py
+```
 
 ---
 

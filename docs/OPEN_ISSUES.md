@@ -72,16 +72,27 @@
 
 ---
 
-## D. 문서 동기화 (2026-05-29 정리에서 처리/추적)
+## D. 문서 동기화 (2026-06-01 코드 대조 갱신)
 
 ### D1. ✅ SYSTEM_OVERVIEW 모터값 stale 정정
-- 구: "모터 속도 딜레이 300". 실제 `ps_main.cpp:118` = **200**, `MOTOR_KP=2.0`(`:100`). → SYSTEM_OVERVIEW §8/§9 갱신 완료.
+- 모터 속도 딜레이 = **200**(`ps_main.cpp:120`). PID = **KP=1.5(`:101`) / KD=0.0(`:102`)**.
+  (구버전 문서의 KP=2.0/KD=0.02는 코드와 불일치 → §8 표 정정 완료.)
 
-### D2. ✅ 3-모드 제어표 정합
-- SYSTEM_OVERVIEW §5를 [motor_control_changes.md](motor_control_changes.md) 최종표(Pan=안테나 방위각 절대위치 전용, Tilt만 분기)와 일치시킴.
+### D2. ✅ 모터 제어표를 "증분 PID"로 정합
+- SYSTEM_OVERVIEW §5 / motor_porting_guide §5를 코드(`ps_main.cpp:944~973`)와 일치.
+- 핵심 정정: Pan은 **절대 위치 SET이 아니라 `angle_to_px(rang)` 증분 PID**.
+  진동 억제는 KD가 아니라 **rang LP필터(α=0.4, `:922`) + KD제거**가 담당.
+- AI 명령 후 `g_host_cmd_cooldown`/`g_ai_lock_frames`로 레이더 오버라이드 차단(문서에 반영).
 
-### D3. ✅ 뷰어 일원화
-- 런타임 뷰어 = `antidrone/unified_gui.py`. `ppi_viewer.py`/`ppi_original.py`는 [legacy/](../legacy/)로 격리. INTEGRATION §7 주석 추가.
+### D3. ✅ 뷰어 일원화 + 키보드 제어 제거
+- 런타임 뷰어 = `antidrone/unified_gui.py`. `ppi_viewer.py`/`ppi_original.py`는 [legacy/](../legacy/)로 격리.
+- **키보드 수동 모터 제어 제거됨.** 모터 명령은 `ptcamera_tracker.exe`가 자동 전송(`P:`/`T:`),
+  GUI는 표시 전용(`unified_gui.py:486~489`). motor_porting_guide §8 정정.
+
+### D4. ✅ _change.md 병합 정리 (2026-06-01)
+- `motor_control_changes_change.md` → `motor_control_changes.md` 병합, `_change` 삭제.
+- `motor_porting_guide_change.md` → `motor_porting_guide.md` 병합 + 코드값(KP/KD) 보정, `_change` 삭제.
+- 루트에 코드 기반 **`CLAUDE.md`** 신규 생성(빌드/프로토콜/상태머신/설정 요약).
 
 ---
 
