@@ -2148,21 +2148,21 @@
       },
       "uln2003_controller_0": {
         "vlnv": "xilinx.com:hls:uln2003_controller:1.0",
-        "ip_revision": "2114634707",
+        "ip_revision": "2114636044",
         "xci_name": "antidrone_bd_uln2003_controller_0_0",
         "xci_path": "ip\\antidrone_bd_uln2003_controller_0_0\\antidrone_bd_uln2003_controller_0_0.xci",
         "inst_hier_path": "uln2003_controller_0"
       },
       "kalman_filter_0": {
         "vlnv": "xilinx.com:hls:kalman_filter:1.0",
-        "ip_revision": "2114634708",
+        "ip_revision": "2114636043",
         "xci_name": "antidrone_bd_kalman_filter_0_1",
         "xci_path": "ip\\antidrone_bd_kalman_filter_0_1\\antidrone_bd_kalman_filter_0_1.xci",
         "inst_hier_path": "kalman_filter_0"
       },
       "cordic_polar_0": {
         "vlnv": "xilinx.com:hls:cordic_polar:1.0",
-        "ip_revision": "2114634709",
+        "ip_revision": "2114636029",
         "xci_name": "antidrone_bd_cordic_polar_0_1",
         "xci_path": "ip\\antidrone_bd_cordic_polar_0_1\\antidrone_bd_cordic_polar_0_1.xci",
         "inst_hier_path": "cordic_polar_0"
@@ -2400,8 +2400,7 @@
                 "bridges": [
                   "M00_AXI",
                   "M01_AXI",
-                  "M02_AXI",
-                  "M03_AXI"
+                  "M02_AXI"
                 ]
               },
               "S02_AXI": {
@@ -2410,8 +2409,7 @@
                 "bridges": [
                   "M00_AXI",
                   "M01_AXI",
-                  "M02_AXI",
-                  "M03_AXI"
+                  "M02_AXI"
                 ]
               },
               "S03_AXI": {
@@ -2420,8 +2418,7 @@
                 "bridges": [
                   "M00_AXI",
                   "M01_AXI",
-                  "M02_AXI",
-                  "M03_AXI"
+                  "M02_AXI"
                 ]
               }
             }
@@ -3283,13 +3280,13 @@
       "ps7_0_axi_periph_M00_AXI": {
         "interface_ports": [
           "ps7_0_axi_periph/M00_AXI",
-          "cordic_polar_0/s_axi_control"
+          "cordic_polar_0/s_axi_CTRL"
         ]
       },
       "ps7_0_axi_periph_M01_AXI": {
         "interface_ports": [
           "ps7_0_axi_periph/M01_AXI",
-          "kalman_filter_0/s_axi_control"
+          "kalman_filter_0/s_axi_CTRL"
         ]
       },
       "ps7_0_axi_periph_M02_AXI": {
@@ -3377,18 +3374,32 @@
           "Data": {
             "segments": {
               "SEG_cordic_polar_0_Reg": {
-                "address_block": "/cordic_polar_0/s_axi_control/Reg",
+                "address_block": "/cordic_polar_0/s_axi_CTRL/Reg",
                 "offset": "0x40000000",
                 "range": "64K",
-                "offset_base_param": "C_S_AXI_CONTROL_BASEADDR",
-                "offset_high_param": "C_S_AXI_CONTROL_HIGHADDR"
+                "offset_base_param": "C_S_AXI_CTRL_BASEADDR",
+                "offset_high_param": "C_S_AXI_CTRL_HIGHADDR"
+              },
+              "SEG_cordic_polar_0_Reg_1": {
+                "address_block": "/cordic_polar_0/s_axi_CTRL/Reg",
+                "offset": "0x40000000",
+                "range": "64K",
+                "offset_base_param": "C_S_AXI_CTRL_BASEADDR",
+                "offset_high_param": "C_S_AXI_CTRL_HIGHADDR"
               },
               "SEG_kalman_filter_0_Reg": {
-                "address_block": "/kalman_filter_0/s_axi_control/Reg",
+                "address_block": "/kalman_filter_0/s_axi_CTRL/Reg",
                 "offset": "0x40010000",
                 "range": "64K",
-                "offset_base_param": "C_S_AXI_CONTROL_BASEADDR",
-                "offset_high_param": "C_S_AXI_CONTROL_HIGHADDR"
+                "offset_base_param": "C_S_AXI_CTRL_BASEADDR",
+                "offset_high_param": "C_S_AXI_CTRL_HIGHADDR"
+              },
+              "SEG_kalman_filter_0_Reg_1": {
+                "address_block": "/kalman_filter_0/s_axi_CTRL/Reg",
+                "offset": "0x40010000",
+                "range": "64K",
+                "offset_base_param": "C_S_AXI_CTRL_BASEADDR",
+                "offset_high_param": "C_S_AXI_CTRL_HIGHADDR"
               },
               "SEG_mti_process_0_Reg": {
                 "address_block": "/mti_process_0/s_axi_control/Reg",
@@ -3413,20 +3424,20 @@
           "Data_m_axi_gmem0": {
             "segments": {
               "SEG_cordic_polar_0_Reg": {
-                "address_block": "/cordic_polar_0/s_axi_control/Reg",
+                "address_block": "/cordic_polar_0/s_axi_CTRL/Reg",
                 "offset": "0x0000000040000000",
                 "range": "64K",
                 "is_excluded": "TRUE",
-                "offset_base_param": "C_S_AXI_CONTROL_BASEADDR",
-                "offset_high_param": "C_S_AXI_CONTROL_HIGHADDR"
+                "offset_base_param": "C_S_AXI_CTRL_BASEADDR",
+                "offset_high_param": "C_S_AXI_CTRL_HIGHADDR"
               },
               "SEG_kalman_filter_0_Reg": {
-                "address_block": "/kalman_filter_0/s_axi_control/Reg",
+                "address_block": "/kalman_filter_0/s_axi_CTRL/Reg",
                 "offset": "0x0000000040010000",
                 "range": "64K",
                 "is_excluded": "TRUE",
-                "offset_base_param": "C_S_AXI_CONTROL_BASEADDR",
-                "offset_high_param": "C_S_AXI_CONTROL_HIGHADDR"
+                "offset_base_param": "C_S_AXI_CTRL_BASEADDR",
+                "offset_high_param": "C_S_AXI_CTRL_HIGHADDR"
               },
               "SEG_mti_process_0_Reg": {
                 "address_block": "/mti_process_0/s_axi_control/Reg",
@@ -3448,20 +3459,36 @@
           "Data_m_axi_gmem1": {
             "segments": {
               "SEG_cordic_polar_0_Reg": {
-                "address_block": "/cordic_polar_0/s_axi_control/Reg",
+                "address_block": "/cordic_polar_0/s_axi_CTRL/Reg",
                 "offset": "0x0000000040000000",
                 "range": "64K",
                 "is_excluded": "TRUE",
-                "offset_base_param": "C_S_AXI_CONTROL_BASEADDR",
-                "offset_high_param": "C_S_AXI_CONTROL_HIGHADDR"
+                "offset_base_param": "C_S_AXI_CTRL_BASEADDR",
+                "offset_high_param": "C_S_AXI_CTRL_HIGHADDR"
+              },
+              "SEG_cordic_polar_0_Reg_1": {
+                "address_block": "/cordic_polar_0/s_axi_CTRL/Reg",
+                "offset": "0x0000000040000000",
+                "range": "64K",
+                "is_excluded": "TRUE",
+                "offset_base_param": "C_S_AXI_CTRL_BASEADDR",
+                "offset_high_param": "C_S_AXI_CTRL_HIGHADDR"
               },
               "SEG_kalman_filter_0_Reg": {
-                "address_block": "/kalman_filter_0/s_axi_control/Reg",
+                "address_block": "/kalman_filter_0/s_axi_CTRL/Reg",
                 "offset": "0x0000000040010000",
                 "range": "64K",
                 "is_excluded": "TRUE",
-                "offset_base_param": "C_S_AXI_CONTROL_BASEADDR",
-                "offset_high_param": "C_S_AXI_CONTROL_HIGHADDR"
+                "offset_base_param": "C_S_AXI_CTRL_BASEADDR",
+                "offset_high_param": "C_S_AXI_CTRL_HIGHADDR"
+              },
+              "SEG_kalman_filter_0_Reg_1": {
+                "address_block": "/kalman_filter_0/s_axi_CTRL/Reg",
+                "offset": "0x0000000040010000",
+                "range": "64K",
+                "is_excluded": "TRUE",
+                "offset_base_param": "C_S_AXI_CTRL_BASEADDR",
+                "offset_high_param": "C_S_AXI_CTRL_HIGHADDR"
               },
               "SEG_mti_process_0_Reg": {
                 "address_block": "/mti_process_0/s_axi_control/Reg",
@@ -3483,20 +3510,36 @@
           "Data_m_axi_gmem2": {
             "segments": {
               "SEG_cordic_polar_0_Reg": {
-                "address_block": "/cordic_polar_0/s_axi_control/Reg",
+                "address_block": "/cordic_polar_0/s_axi_CTRL/Reg",
                 "offset": "0x0000000040000000",
                 "range": "64K",
                 "is_excluded": "TRUE",
-                "offset_base_param": "C_S_AXI_CONTROL_BASEADDR",
-                "offset_high_param": "C_S_AXI_CONTROL_HIGHADDR"
+                "offset_base_param": "C_S_AXI_CTRL_BASEADDR",
+                "offset_high_param": "C_S_AXI_CTRL_HIGHADDR"
+              },
+              "SEG_cordic_polar_0_Reg_1": {
+                "address_block": "/cordic_polar_0/s_axi_CTRL/Reg",
+                "offset": "0x0000000040000000",
+                "range": "64K",
+                "is_excluded": "TRUE",
+                "offset_base_param": "C_S_AXI_CTRL_BASEADDR",
+                "offset_high_param": "C_S_AXI_CTRL_HIGHADDR"
               },
               "SEG_kalman_filter_0_Reg": {
-                "address_block": "/kalman_filter_0/s_axi_control/Reg",
+                "address_block": "/kalman_filter_0/s_axi_CTRL/Reg",
                 "offset": "0x0000000040010000",
                 "range": "64K",
                 "is_excluded": "TRUE",
-                "offset_base_param": "C_S_AXI_CONTROL_BASEADDR",
-                "offset_high_param": "C_S_AXI_CONTROL_HIGHADDR"
+                "offset_base_param": "C_S_AXI_CTRL_BASEADDR",
+                "offset_high_param": "C_S_AXI_CTRL_HIGHADDR"
+              },
+              "SEG_kalman_filter_0_Reg_1": {
+                "address_block": "/kalman_filter_0/s_axi_CTRL/Reg",
+                "offset": "0x0000000040010000",
+                "range": "64K",
+                "is_excluded": "TRUE",
+                "offset_base_param": "C_S_AXI_CTRL_BASEADDR",
+                "offset_high_param": "C_S_AXI_CTRL_HIGHADDR"
               },
               "SEG_mti_process_0_Reg": {
                 "address_block": "/mti_process_0/s_axi_control/Reg",

@@ -57,11 +57,12 @@ from pantilt_calibration_utils import (
 # ---------------------------------------------------------------------------
 KEY_ESC = 27
 KEY_SPACE = 32
-# Windows DirectInput 확장 코드 + Qt/X11 코드 모두 포함
-KEY_LEFT  = {81, 65361, 2424832}  # Left arrow
-KEY_UP    = {82, 65362, 2490368}  # Up arrow
-KEY_RIGHT = {83, 65363, 2555904}  # Right arrow
-KEY_DOWN  = {84, 65364, 2621440}  # Down arrow
+# Windows DirectInput 확장 코드 + Qt/X11 코드만 포함
+# ※ 81=Q, 82=R, 83=S, 84=T 같은 ASCII는 WASD/R(reset) 키와 충돌하므로 제외
+KEY_LEFT  = {65361, 2424832}   # Left arrow
+KEY_UP    = {65362, 2490368}   # Up arrow
+KEY_RIGHT = {65363, 2555904}   # Right arrow
+KEY_DOWN  = {65364, 2621440}   # Down arrow
 KEY_PLUS  = {ord("+"), ord("=")}
 KEY_MINUS = {ord("-"), ord("_")}
 
@@ -106,7 +107,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--settle-sec",
         type=float,
-        default=0.4,
+        default=0.15,
         help="Seconds to wait after sending motor command before reading camera.",
     )
     # 초기 상대 이동 (선택)
@@ -351,10 +352,17 @@ def save_sample(
 # 이동 후 카메라 버퍼 플러시
 # ---------------------------------------------------------------------------
 def flush_camera(cap: cv2.VideoCapture, n_frames: int, settle_sec: float) -> None:
-    """모터 이동 후 settle_sec 대기 + 버퍼 프레임 n_frames 소비."""
+    """모터 이동 후 settle_sec 대기 + 버퍼 프레임 소비 + 키 입력 버퍼 비우기.
+
+    waitKeyEx 를 사용해야 확장 키코드(화살표 등)도 OS 버퍼에서 제거된다.
+    waitKey(1) 은 확장 키를 0 으로 변환해 -1 과 구별 안 되므로 부적합.
+    """
     time.sleep(settle_sec)
     for _ in range(n_frames):
-        cap.grab()  # grab()은 retrieve() 없이 버퍼만 비움
+        cap.grab()
+    # settle 중 눌린 키를 모두 버림 — 반대 방향 오입력 방지
+    while cv2.waitKeyEx(1) != -1:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -463,10 +471,8 @@ def main() -> None:
                 break
 
             # ── 이동 키 ──
-            # 펌웨어(ps_main.cpp) 구조:
-            #   g_host_pan_steps != 0 일 때만 motor_update_full_host() 진입.
-            #   → Tilt 단독 이동 시에도 P:+1\n을 함께 보내 트리거.
-            #     1 step < MOTOR_PAN_MIN_STEP(5) → 실제 pan 이동 없음.
+            # 새 펌웨어(motor_try_move_pending): pan=0, tilt≠0 단독 명령도 정상 실행.
+            # pan 이동 시 send_tilt(0) 불필요 — 제거하여 tilt pending 오염 방지.
             moved = False
             delta_steps = 0
             axis = ""
@@ -474,13 +480,11 @@ def main() -> None:
             if key in KEY_LEFT or key in (ord("a"), ord("A")):
                 delta_steps = state.move_pan(-state.angle_step_deg)
                 motor.send_pan(delta_steps)
-                motor.send_tilt(0)  # tilt 현재 상태 명시 (선택)
                 axis = "pan"
                 moved = True
             elif key in KEY_RIGHT or key in (ord("d"), ord("D")):
                 delta_steps = state.move_pan(+state.angle_step_deg)
                 motor.send_pan(delta_steps)
-                motor.send_tilt(0)
                 axis = "pan"
                 moved = True
             elif key in KEY_UP or key in (ord("w"), ord("W")):

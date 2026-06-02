@@ -78,6 +78,8 @@ def main():
     parser.add_argument('--fps', type=float, default=15.0)
     parser.add_argument('--duration', type=float, default=0.0,
                         help='seconds; 0 means run until Ctrl+C')
+    parser.add_argument('--send-z', action='store_true',
+                        help='include synthetic z_mm/altitude_mm for 3D GUI testing')
     args = parser.parse_args()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -101,8 +103,12 @@ def main():
             t = now - start
             x_mm = int(math.sin(t * 0.8) * 2200)
             y_mm = int(4200 + math.cos(t * 0.55) * 1100)
+            z_mm = int(900 + math.sin(t * 0.45) * 500)
             speed = int(120 + 35 * math.sin(t * 1.7))
-            line = f'[RADAR] T0:({x_mm},{y_mm})mm spd={speed}cm/s\n'
+            if args.send_z:
+                line = f'[RADAR] T0:({x_mm},{y_mm},{z_mm})mm spd={speed}cm/s\n'
+            else:
+                line = f'[RADAR] T0:({x_mm},{y_mm})mm spd={speed}cm/s\n'
             telemetry = {
                 'fps': args.fps,
                 'target_found': True,
@@ -119,6 +125,9 @@ def main():
                 'serial_open': True,
                 'device': 'SIM',
             }
+            if args.send_z:
+                telemetry['target_id'] = 0
+                telemetry['z_mm'] = z_mm
 
             sock.sendto(make_bmp_frame(t), cam_addr)
             sock.sendto(line.encode('ascii'), radar_addr)

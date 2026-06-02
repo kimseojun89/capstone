@@ -1,14 +1,7 @@
-/**
- * ============================================================
- * ps_main.cpp  —  Anti-Drone Sensor Fusion Core
- * [Phase 2: FPGA-Only Control — AI 추론 제외 전부 FPGA 처리]
- * 변경 이력:
- * - SW CORDIC/Kalman 폴백 제거 (HLS IP 전용)
- * - 프로토콜 P:/T: → B:ex,ey (bbox 픽셀 오차) 추가
- *   PC는 bbox 중심 오차만 전송, PID 계산은 FPGA 전담
- * - motor_update_ai_bbox(): 카메라 Pan+Tilt PID 신설
- * - P:/T:는 수동 캘리브레이션 전용으로 유지
- * ============================================================
+﻿/**
+ * Anti-Drone Sensor Fusion Core (ps_main.cpp)
+ * FPGA PS(ARM) 실행: 레이더 UART 파싱 → CORDIC/Kalman HLS IP → Pan/Tilt 모터 제어
+ * PC는 AI 추론 결과(bbox 오차)만 B:ex,ey로 전송하며, PID 계산은 FPGA 전담.
  */
 
 #include <cstdint>
@@ -16,25 +9,25 @@
 #include <cstdlib>
 #include <cmath>
 
-// Xilinx BSP
 #include "xparameters.h"
 #include "xil_printf.h"
 #include "xil_io.h"
 #include "xil_cache.h"
 #include "xuartps.h"
-#include "sleep.h" // 블로킹 딜레이 제거됨
+#include "sleep.h"
 
 // ============================================================
 //  컴파일 타임 설정
 // ============================================================
-#define LOG_LEVEL           1       // 1 = 요약 로그, 2 = 상세 로그
+#define LOG_LEVEL           1
 #define CAM_HFOV_DEG        60.0f
 #define CAM_W_PX            320
 #define CAM_H_PX            240
 #define RADAR_UART_BAUD     256000u
-#define CONSOLE_UART_BAUD   256000u  // 호스트 tilt 명령 채널 겸용
+#define CONSOLE_UART_BAUD   256000u
 #define RADAR_STALE_FRAMES  5
-#define MAIN_LOOP_SLEEP_US  33000u  // 30Hz (복원: DT=0.033과 일치)
+// 30Hz 타깃 (DT=0.033s). Kalman IP도 DT=0.033f로 맞춰야 함 → kalman_filter.cpp 수정 필요
+#define MAIN_LOOP_SLEEP_US  33000u
 #define RADAR_LOG_PERIOD_FRAMES  1
 
 #ifndef XPAR_XUARTPS_0_BASEADDR
@@ -48,17 +41,14 @@
 #endif
 
 // ============================================================
-//  HLS IP 공통 ap_ctrl 비트 (CORDIC/Kalman/Motor 공용)
-//  ※ MTI 서브시스템은 legacy/mti_subsystem/ 로 분리됨 (2026-06-01)
+//  HLS IP 공통 ap_ctrl 비트 (AXI4-Lite 오프셋 0x00)
 // ============================================================
-
 #define AP_START  (1u << 0)
 #define AP_DONE   (1u << 1)
 #define AP_IDLE   (1u << 2)
 
 // ============================================================
 //  ULN2003 모터 컨트롤러 IP 레지스터 맵
-//  (xuln2003_controller_hw.h 기준)
 // ============================================================
 #ifndef XPAR_ULN2003_CONTROLLER_0_BASEADDR
     #define MOTOR_BASEADDR  0x40030000
@@ -69,33 +59,23 @@
 #define MOTOR_WR(off, v)  Xil_Out32(MOTOR_BASEADDR + (off), (u32)(v))
 #define MOTOR_RD(off)     Xil_In32 (MOTOR_BASEADDR + (off))
 
-// Pan/Tilt PID 파라미터 — C++ TrackerSettings 기본값과 동일
-#define MOTOR_KP            1.5f
-#define MOTOR_KD            0.0f   // D항 제거: 레이더 노이즈 증폭 방지 (P제어만 사용)
-#define MOTOR_PAN_DEADBAND  35      // 픽셀
-#define MOTOR_TILT_DEADBAND 35      // 픽셀
-// MAX_STEP = 33ms(프레임) / ms/step 으로 맞춰야 IP실행≈프레임 → 30Hz 연속 업데이트
-// MAX_STEP이 너무 크면 IP가 수백ms 점유 → 2~3Hz로 떨어져 오히려 느림
-#define MOTOR_PAN_MIN_STEP  5
-#define MOTOR_PAN_MAX_STEP  58    // 33ms / 0.57ms = 58 스텝 → IP≈프레임, 30Hz 연속
-#define MOTOR_TILT_MIN_STEP 5
-#define MOTOR_TILT_MAX_STEP 58
-// 명령 슬루율 — AccelStepper의 setAcceleration에 해당
-#define MOTOR_CMD_RAMP      20.0f
-// hw_delay() 루프 카운트 — 실측 기준표:
-//   80000 = 226ms/step  (35도: ~90초)
-//     300 =   0.85ms/step → MAX_STEP=38 최적 (101°/s)
-//     200 =   0.57ms/step → MAX_STEP=58 최적 (154°/s) ← 현재 (pan 탈조 없는 최고속)
-//     170 =   0.48ms/step → pan 58스텝 연속 시 탈조 확인됨
-//     150 =   0.42ms/step → 탈조 위험
-// 탈조 시 → SPEED_DELAY=300, MAX_STEP=38 으로 되돌릴 것
-#define MOTOR_SPEED_DELAY   200
-#define MOTOR_ACQUIRE_RAMP  1.0f    // 첫 표적 획득 가속비 (1.0=억제 없음; control.cpp acquireRampScale)
-#define MOTOR_DT            0.033f  // 30fps 기준 루프 주기
+// 28BYJ-48 half-step 사양 (pan/tilt 중력 부하 없음 → 동일 속도)
+#define MOTOR_STEPS_PER_REV     4096         // 1회전 = 4096 step
+// hw_delay 루프카운트: 300 → 0.85ms/step
+#define MOTOR_SPEED_DELAY       300          // pan/tilt 공통
+// 1프레임(33ms) 내 완료 가능 최대 스텝: 33ms / 0.85ms ≈ 38
+#define MOTOR_PAN_MAX_STEP      38
+#define MOTOR_TILT_MAX_STEP     38
+// 절대좌표 직변환: (4096/360) × 60° / 320px ≈ 2.134 step/px
+// 4:3 화면(240px VFOV≈45°) 기준 수직도 동일: (4096/360) × 45° / 240px ≈ 2.134
+#define STEPS_PER_DEG           (4096.0f / 360.0f)
+#define STEPS_PER_PX            (STEPS_PER_DEG * CAM_HFOV_DEG / (float)CAM_W_PX)
+// 픽셀 데드밴드: ±8px 이내 미동 없음 (≈17 step, ≈1.5°)
+#define CAM_DEADBAND_PX         8
 
 // ============================================================
 //  CORDIC Polar IP (AXI4-Lite, 0x40000000)
-//  cordic_polar.cpp 동일 알고리즘 — 출력 단위: 0.1도
+//  각도 출력 단위: 0.1도 (angle_deg × 10)
 // ============================================================
 #ifndef XPAR_CORDIC_POLAR_0_BASEADDR
     #define CORDIC_BASEADDR  0x40000000
@@ -109,9 +89,6 @@
 
 // ============================================================
 //  Kalman Filter IP (AXI4-Lite, 0x40010000)
-//  kalman_filter.cpp 동일 알고리즘 — 내부 DT=0.1f (10Hz 기준)
-//  ※ 현재 루프 주기 ~33ms(30fps)와 불일치 → 속도 추정치 스케일 차이 발생
-//     추후 HLS DT 수정 또는 호출 주기 100ms 조정 필요
 // ============================================================
 #ifndef XPAR_KALMAN_FILTER_0_BASEADDR
     #define KALMAN_BASEADDR  0x40010000
@@ -121,18 +98,40 @@
 
 #define KALMAN_WR(off, v)  Xil_Out32(KALMAN_BASEADDR + (off), (u32)(v))
 #define KALMAN_RD(off)     Xil_In32 (KALMAN_BASEADDR + (off))
-// targets_in: 0x20~0x3F (3×64-bit, 8byte/target)
-//   Word n*2+0 at 0x20+8n: (uint16)y<<16 | (uint16)x
-//   Word n*2+1 at 0x24+8n: (uint32)valid<<16 | (uint16)speed
-// states_out: 0x80~0xDF (3×5×32-bit, 32byte/state, 5 words used + 3 reserved)
-//   per state n at 0x80+32n: [x(f32), y(f32), vx(f32), vy(f32), init(u32 bit0)]
+
+// Kalman HLS scalar-port register map from xkalman_filter_hw.h.
+// Pointer outputs also have *_CTRL ap_vld registers; PS reads only *_DATA.
+#define KALMAN_ADDR_AP_CTRL     0x00u
+#define KALMAN_ADDR_RESET_DATA  0x10u
+
+#define KALMAN_ADDR_T0_W1_DATA  0x18u
+#define KALMAN_ADDR_T0_W0_DATA  0x20u
+#define KALMAN_ADDR_T1_W0_DATA  0x28u
+#define KALMAN_ADDR_T2_W0_DATA  0x30u
+#define KALMAN_ADDR_T1_W1_DATA  0x38u
+#define KALMAN_ADDR_T2_W1_DATA  0x40u
+
+#define KALMAN_ADDR_S0Y_DATA    0x48u
+#define KALMAN_ADDR_S1VY_DATA   0x50u
+#define KALMAN_ADDR_S0VY_DATA   0x58u
+#define KALMAN_ADDR_S2Y_DATA    0x60u
+#define KALMAN_ADDR_S1Y_DATA    0x68u
+#define KALMAN_ADDR_S2VY_DATA   0x70u
+#define KALMAN_ADDR_S0X_DATA    0x80u
+#define KALMAN_ADDR_S0VX_DATA   0x88u
+#define KALMAN_ADDR_S0INIT_DATA 0x90u
+#define KALMAN_ADDR_S1X_DATA    0xA0u
+#define KALMAN_ADDR_S1VX_DATA   0xA8u
+#define KALMAN_ADDR_S1INIT_DATA 0xB0u
+#define KALMAN_ADDR_S2X_DATA    0xC0u
+#define KALMAN_ADDR_S2VX_DATA   0xC8u
+#define KALMAN_ADDR_S2INIT_DATA 0xD0u
 
 #define MAX_TARGETS  3
 
 // ============================================================
 //  자료형
 // ============================================================
-
 typedef struct __attribute__((packed)) { int16_t x,y,speed; bool valid; } RadarTarget_t;
 typedef struct __attribute__((packed)) { float x,y,vx,vy; bool init; } KalmanState_t;
 
@@ -166,9 +165,10 @@ static int console_init(void)
 }
 
 // ============================================================
-//  UART 링 버퍼 및 파싱 (지연 시간 0ms 달성 로직)
+//  레이더 UART1 수신 링버퍼
 // ============================================================
-#define RING_SZ  2048 // 오버플로우 방지를 위해 버퍼 증대
+// 2048바이트: 30Hz 루프에서 30-byte 패킷 여러 개 누적되어도 오버플로우 없음
+#define RING_SZ  2048
 static XUartPs g_uart;
 static uint8_t g_ring[RING_SZ];
 static uint32_t g_head = 0, g_tail = 0;
@@ -181,6 +181,7 @@ static uint32_t g_rx_hw_errors = 0;
 
 static void ring_push(uint8_t b)
 {
+    // 오버플로우 시 가장 오래된 데이터를 버리고 최신 데이터 우선 보존
     if ((g_head - g_tail) >= RING_SZ) {
         g_tail = g_head - RING_SZ + 1u;
         g_rx_ring_overflows++;
@@ -192,22 +193,22 @@ static void ring_push(uint8_t b)
 static uint8_t ring_at(uint32_t i) { return g_ring[i % RING_SZ]; }
 
 // ============================================================
-//  HOST UART0 링버퍼 — Windows 호스트 "T:±N\n" tilt 명령 수신
+//  호스트(Windows PC) UART0 수신 링버퍼 및 명령 파서
 // ============================================================
 #define HOST_RING_SZ  256
 static uint8_t  g_host_ring[HOST_RING_SZ];
 static uint32_t g_host_head = 0;
 static uint32_t g_host_tail = 0;
-static int      g_motor_abs_pan       = 0;  // IP 누적 목표 (A: 파서에서 참조 — 선언 순서 주의)
+static int      g_motor_abs_pan       = 0;
 static int      g_motor_abs_tilt      = 0;
-static int      g_manual_pending_pan  = 0;  // 수동 모드 미실행 pan 잔량 (M:1 전용, 유실 없음)
-static int      g_manual_pending_tilt = 0;  // 수동 모드 미실행 tilt 잔량
+static int      g_manual_pending_pan  = 0;  // M:1 수동 모드 미실행 pan 잔량
+static int      g_manual_pending_tilt = 0;  // M:1 수동 모드 미실행 tilt 잔량
 static int      g_abs_pending_pan     = 0;  // A: 절대좌표 명령 미실행 pan 잔량
 static int      g_abs_pending_tilt    = 0;  // A: 절대좌표 명령 미실행 tilt 잔량
-static int      g_host_bbox_ex        = 0;  // AI 모드: bbox 중심 x 오차 (320px 기준 스케일)
-static int      g_host_bbox_ey        = 0;  // AI 모드: bbox 중심 y 오차 (240px 기준 스케일)
-static bool     g_host_bbox_valid     = false;  // 이번 프레임 bbox 수신 여부
-static bool     g_manual_mode         = false;  // 수동 모드: minStep 제한 없음 (캘리브레이션용)
+static int      g_host_bbox_ex        = 0;
+static int      g_host_bbox_ey        = 0;
+static bool     g_host_bbox_valid     = false;  // 이번 프레임에 bbox 수신됐는지 여부
+static bool     g_manual_mode         = false;  // true 시 minStep 클램프 해제 (캘리브레이션용)
 
 static void host_ring_push(uint8_t b)
 {
@@ -218,7 +219,6 @@ static void host_ring_push(uint8_t b)
 }
 static uint8_t host_ring_at(uint32_t i) { return g_host_ring[i % HOST_RING_SZ]; }
 
-// UART0(g_console_uart) RX FIFO → 호스트 링버퍼 (논블로킹)
 static void host_accumulate(void)
 {
     uint8_t tmp[64];
@@ -227,11 +227,10 @@ static void host_accumulate(void)
         for (int i = 0; i < n; ++i) host_ring_push(tmp[i]);
 }
 
-// "T:±N\n" 및 "P:±N\n" 파서 — 완전한 라인을 소비해 g_host_tilt/pan_steps 갱신
+// '\n' 종단 라인 단위로 B:/A:/P:/T:/M: 명령 파싱
 static void host_parse_commands(void)
 {
     while ((int32_t)(g_host_head - g_host_tail) > 0) {
-        // '\n' 위치 탐색
         uint32_t scan = g_host_tail;
         bool found_nl = false;
         uint32_t nl_pos = 0;
@@ -239,7 +238,7 @@ static void host_parse_commands(void)
             if (host_ring_at(scan) == '\n') { nl_pos = scan; found_nl = true; break; }
             scan++;
         }
-        if (!found_nl) break;  // 아직 완전한 라인 없음
+        if (!found_nl) break;
 
         int32_t len = (int32_t)(nl_pos - g_host_tail);
         if (len < 3 || len > 24) { g_host_tail = nl_pos + 1; continue; }
@@ -248,8 +247,7 @@ static void host_parse_commands(void)
         if ((cmd == 'T' || cmd == 'P' || cmd == 'M' || cmd == 'B' || cmd == 'A') &&
              host_ring_at(g_host_tail + 1) == ':') {
             if (cmd == 'B') {
-                // "B:ex,ey" — 부호 있는 정수 두 개, 쉼표 구분
-                // ex: bbox_cx 오차 (320px 기준 스케일), ey: bbox_cy 오차 (240px 기준 스케일)
+                // B:ex,ey — AI bbox 중심 오차 (PC에서 스케일 변환 후 전송)
                 int ex = 0, ey = 0, sign = 1;
                 uint32_t p = g_host_tail + 2;
                 bool ok = false;
@@ -257,8 +255,11 @@ static void host_parse_commands(void)
                 else if ((int32_t)(nl_pos - p) > 0 && host_ring_at(p) == '+') { p++; }
                 while ((int32_t)(nl_pos - p) > 0) {
                     uint8_t c = host_ring_at(p++);
-                    if (c >= '0' && c <= '9') { ex = ex * 10 + (c - '0'); ok = true; }
-                    else if (c == ',') { ex = sign * ex; sign = 1; break; }
+                    if (c >= '0' && c <= '9') {
+                        ex = ex * 10 + (c - '0');
+                        if (ex > 32767) { ok = false; break; }
+                        ok = true;
+                    } else if (c == ',') { ex = sign * ex; sign = 1; break; }
                     else { ok = false; break; }
                 }
                 if (ok) {
@@ -267,8 +268,11 @@ static void host_parse_commands(void)
                     else if ((int32_t)(nl_pos - p) > 0 && host_ring_at(p) == '+') { p++; }
                     while ((int32_t)(nl_pos - p) > 0) {
                         uint8_t c = host_ring_at(p++);
-                        if (c >= '0' && c <= '9') { ey = ey * 10 + (c - '0'); ok = true; }
-                        else { ok = false; break; }
+                        if (c >= '0' && c <= '9') {
+                            ey = ey * 10 + (c - '0');
+                            if (ey > 32767) { ok = false; break; }
+                            ok = true;
+                        } else { ok = false; break; }
                     }
                 }
                 if (ok) {
@@ -277,7 +281,7 @@ static void host_parse_commands(void)
                     g_host_bbox_valid = true;
                 }
             } else if (cmd == 'A') {
-                // "A:pan_steps,tilt_steps" — 절대 스텝 좌표 이동 (pose table 기반)
+                // A:pan,tilt — 절대 스텝 좌표 지정 (pose table 기반)
                 int pan = 0, tilt_val = 0, sign = 1;
                 uint32_t p = g_host_tail + 2;
                 bool ok = false;
@@ -285,8 +289,11 @@ static void host_parse_commands(void)
                 else if ((int32_t)(nl_pos-p) > 0 && host_ring_at(p) == '+') { p++; }
                 while ((int32_t)(nl_pos-p) > 0) {
                     uint8_t c = host_ring_at(p++);
-                    if (c >= '0' && c <= '9') { pan = pan*10 + (c-'0'); ok = true; }
-                    else if (c == ',') { pan = sign*pan; sign = 1; break; }
+                    if (c >= '0' && c <= '9') {
+                        pan = pan*10 + (c-'0');
+                        if (pan > 32767) { ok = false; break; }
+                        ok = true;
+                    } else if (c == ',') { pan = sign*pan; sign = 1; break; }
                     else { ok = false; break; }
                 }
                 if (ok) {
@@ -295,11 +302,15 @@ static void host_parse_commands(void)
                     else if ((int32_t)(nl_pos-p) > 0 && host_ring_at(p) == '+') { p++; }
                     while ((int32_t)(nl_pos-p) > 0) {
                         uint8_t c = host_ring_at(p++);
-                        if (c >= '0' && c <= '9') { tilt_val = tilt_val*10 + (c-'0'); ok = true; }
-                        else { ok = false; break; }
+                        if (c >= '0' && c <= '9') {
+                            tilt_val = tilt_val*10 + (c-'0');
+                            if (tilt_val > 32767) { ok = false; break; }
+                            ok = true;
+                        } else { ok = false; break; }
                     }
                 }
                 if (ok) {
+                    // 현재 위치 기준 상대 스텝을 펜딩 큐에 적재
                     g_abs_pending_pan  = pan           - g_motor_abs_pan;
                     g_abs_pending_tilt = sign*tilt_val - g_motor_abs_tilt;
                 }
@@ -311,8 +322,11 @@ static void host_parse_commands(void)
                 bool ok = false;
                 while ((int32_t)(nl_pos - p) > 0) {
                     uint8_t c = host_ring_at(p++);
-                    if (c >= '0' && c <= '9') { val = val * 10 + (c - '0'); ok = true; }
-                    else { ok = false; break; }
+                    if (c >= '0' && c <= '9') {
+                        val = val * 10 + (c - '0');
+                        if (val > 32767) { ok = false; break; }  // 모터 스텝 범위 초과 방지
+                        ok = true;
+                    } else { ok = false; break; }
                 }
                 if (ok) {
                     if (cmd == 'T') {
@@ -320,7 +334,7 @@ static void host_parse_commands(void)
                     } else if (cmd == 'P') {
                         if (g_manual_mode) g_manual_pending_pan  += sign * val;
                     } else if (cmd == 'M') {
-                        // M:0 / M:1 모두 pending 클리어 — 크래시 후 잔량 제거
+                        // 모드 전환 시 잔량 클리어: 이전 명령이 모드 변경 후 실행되는 오작동 방지
                         g_manual_pending_pan  = 0;
                         g_manual_pending_tilt = 0;
                         g_manual_mode = (val != 0);
@@ -354,17 +368,17 @@ static void uart_accumulate(void)
 
     uint8_t tmp[128];
     int n = 0;
-    // 버퍼에 있는 데이터를 남김없이 모두 긁어옴 (Non-blocking)
     while ((n = XUartPs_Recv(&g_uart, tmp, sizeof(tmp))) > 0) {
         for (int i = 0; i < n; ++i) ring_push(tmp[i]);
     }
 }
 
+// usleep() 대기 중에도 UART 수신을 1ms마다 계속 수행 → 고속 레이더 데이터 손실 방지
 static void responsive_sleep_us(uint32_t total_us)
 {
     while (total_us > 0u) {
         uart_accumulate();
-        host_accumulate();  // 호스트 tilt 명령 폴링
+        host_accumulate();
         const uint32_t step_us = (total_us > 1000u) ? 1000u : total_us;
         usleep(step_us);
         total_us -= step_us;
@@ -373,16 +387,17 @@ static void responsive_sleep_us(uint32_t total_us)
     host_accumulate();
 }
 
+// 레이더 원시 좌표 부호 복원: MSB=1→양수, MSB=0→음수 (레이더 자체 인코딩 규약)
 static int16_t decode_coord(uint16_t raw)
 {
     return (raw & 0x8000) ? (int16_t)(raw - 0x8000) : -(int16_t)(raw & 0x7FFF);
 }
 
+// 링버퍼에서 헤더(0xAAFF)·푸터(0x55CC) 검증 후 최신 유효 패킷으로 덮어씀
 static bool uart_parse(RadarTarget_t tgt[3], int* vc)
 {
     bool found_valid = false;
-    
-    // 버퍼를 끝까지 뒤져서 가장 '최신' 패킷으로 덮어씀
+
     while ((int32_t)(g_head - g_tail) >= 30) {
         if (ring_at(g_tail) != 0xAA || ring_at(g_tail+1) != 0xFF)
             { g_tail++; continue; }
@@ -414,37 +429,36 @@ static int uart_init(void)
 {
     XUartPs_Config* c = NULL;
     g_uart_ready = false;
-    
-    // Vitis 2023.2 SDT vs Legacy 분기 처리
+
 #if defined(SDT)
-    c = XUartPs_LookupConfig(XPAR_XUARTPS_1_BASEADDR); 
+    c = XUartPs_LookupConfig(XPAR_XUARTPS_1_BASEADDR);
 #else
     c = XUartPs_LookupConfig(XPAR_XUARTPS_1_DEVICE_ID);
 #endif
 
     if (!c) return -1;
     if (XUartPs_CfgInitialize(&g_uart, c, c->BaseAddress) != XST_SUCCESS) return -1;
-    
+
     XUartPs_SetBaudRate(&g_uart, RADAR_UART_BAUD);
     XUartPs_SetOperMode(&g_uart, XUARTPS_OPER_MODE_NORMAL);
     XUartPs_WriteReg(g_uart.Config.BaseAddress, XUARTPS_ISR_OFFSET, XUARTPS_IXR_MASK);
     g_head = 0;
     g_tail = 0;
     g_uart_ready = true;
-    XUartPs_SetFifoThreshold(&g_uart, 1); // 즉각적인 수신 반응
-    
+    XUartPs_SetFifoThreshold(&g_uart, 1);
+
     return 0;
 }
 
 // ============================================================
-//  CORDIC IP 호출 (AXI4-Lite)
-//  입력 순서: (y, x) — 카메라 좌표계(정면 0도) 변환 유지
+//  CORDIC Polar IP 호출
 // ============================================================
+// (y, x) 순서로 입력: 레이더 좌표계에서 정면=0도 유지를 위한 축 교환
 static void cordic_ip_call(int16_t xi, int16_t yi,
                             uint16_t* dm, int16_t* at)
 {
-    CORDIC_WR(0x10, (u32)(int32_t)xi);   // x_in
-    CORDIC_WR(0x18, (u32)(int32_t)yi);   // y_in
+    CORDIC_WR(0x10, (u32)(int32_t)xi);
+    CORDIC_WR(0x18, (u32)(int32_t)yi);
     CORDIC_WR(0x00, AP_START);
     u32 to = 500000;
     while (!(CORDIC_RD(0x00) & AP_DONE)) {
@@ -454,55 +468,83 @@ static void cordic_ip_call(int16_t xi, int16_t yi,
             *dm = 0; *at = 0; return;
         }
     }
-    *dm = (uint16_t)(CORDIC_RD(0x20) & 0xFFFFu);          // distance
-    *at = (int16_t) (CORDIC_RD(0x30) & 0xFFFFu);          // angle_deg (0.1도 단위)
+    *dm = (uint16_t)(CORDIC_RD(0x20) & 0xFFFFu);
+    *at = (int16_t) (CORDIC_RD(0x30) & 0xFFFFu);
 }
 
 static void process_radar_target(const RadarTarget_t& t, uint16_t* dist_mm, int16_t* yaw_deg10)
 {
-    // (Y, X) 순서: 카메라 좌표계(정면 0도)로 변환
     cordic_ip_call(t.y, t.x, dist_mm, yaw_deg10);
 }
 
 // ============================================================
-//  Kalman Filter IP 함수
-//  내부 상태(st, P, st_init)는 PL LUTRAM에 유지 — PS 측 보관 불필요
+//  Kalman Filter IP
+//  내부 상태(공분산 행렬 등)는 PL LUTRAM에 유지 → PS가 별도 보관 불필요
 // ============================================================
 
-// targets_in 쓰기 헬퍼: RadarTarget_t → 64-bit AXI 메모리 패킹
-//   Word 0 at 0x20+8n : (uint16)y<<16 | (uint16)x
-//   Word 1 at 0x24+8n : (uint32)valid<<16 | (uint16)speed
+// RadarTarget_t → 64-bit AXI 패킹 (IP 입력 포맷)
 static void kalman_write_target(int n, const RadarTarget_t* t)
 {
+    static const u32 w0_addr[MAX_TARGETS] = {
+        KALMAN_ADDR_T0_W0_DATA,
+        KALMAN_ADDR_T1_W0_DATA,
+        KALMAN_ADDR_T2_W0_DATA
+    };
+    static const u32 w1_addr[MAX_TARGETS] = {
+        KALMAN_ADDR_T0_W1_DATA,
+        KALMAN_ADDR_T1_W1_DATA,
+        KALMAN_ADDR_T2_W1_DATA
+    };
     u32 w0 = ((u32)(uint16_t)(int16_t)t->y << 16)
            | ((u32)(uint16_t)(int16_t)t->x);
     u32 w1 = ((u32)(t->valid ? 1u : 0u) << 16)
            | ((u32)(uint16_t)(int16_t)t->speed);
-    KALMAN_WR(0x20 + 8*n,     w0);
-    KALMAN_WR(0x20 + 8*n + 4, w1);
+    KALMAN_WR(w0_addr[n], w0);
+    KALMAN_WR(w1_addr[n], w1);
 }
 
-// states_out 읽기 헬퍼: 32-byte 블록 → KalmanState_t
-//   5 words: x(f32), y(f32), vx(f32), vy(f32), init(u32 bit0)
-//   나머지 3 words는 reserved (읽지 않음)
+// 32-byte 블록 → KalmanState_t (5 word 유효, 나머지 reserved)
 static void kalman_read_state(int n, KalmanState_t* s)
 {
-    u32 base = 0x80 + 32 * n;
+    static const u32 x_addr[MAX_TARGETS] = {
+        KALMAN_ADDR_S0X_DATA,
+        KALMAN_ADDR_S1X_DATA,
+        KALMAN_ADDR_S2X_DATA
+    };
+    static const u32 y_addr[MAX_TARGETS] = {
+        KALMAN_ADDR_S0Y_DATA,
+        KALMAN_ADDR_S1Y_DATA,
+        KALMAN_ADDR_S2Y_DATA
+    };
+    static const u32 vx_addr[MAX_TARGETS] = {
+        KALMAN_ADDR_S0VX_DATA,
+        KALMAN_ADDR_S1VX_DATA,
+        KALMAN_ADDR_S2VX_DATA
+    };
+    static const u32 vy_addr[MAX_TARGETS] = {
+        KALMAN_ADDR_S0VY_DATA,
+        KALMAN_ADDR_S1VY_DATA,
+        KALMAN_ADDR_S2VY_DATA
+    };
+    static const u32 init_addr[MAX_TARGETS] = {
+        KALMAN_ADDR_S0INIT_DATA,
+        KALMAN_ADDR_S1INIT_DATA,
+        KALMAN_ADDR_S2INIT_DATA
+    };
     u32 tmp;
     float fx, fy, fvx, fvy;
-    tmp = KALMAN_RD(base +  0); memcpy(&fx,  &tmp, 4);
-    tmp = KALMAN_RD(base +  4); memcpy(&fy,  &tmp, 4);
-    tmp = KALMAN_RD(base +  8); memcpy(&fvx, &tmp, 4);
-    tmp = KALMAN_RD(base + 12); memcpy(&fvy, &tmp, 4);
-    bool init = (KALMAN_RD(base + 16) & 0x1u) != 0u;
+    tmp = KALMAN_RD(x_addr[n]);  memcpy(&fx,  &tmp, 4);
+    tmp = KALMAN_RD(y_addr[n]);  memcpy(&fy,  &tmp, 4);
+    tmp = KALMAN_RD(vx_addr[n]); memcpy(&fvx, &tmp, 4);
+    tmp = KALMAN_RD(vy_addr[n]); memcpy(&fvy, &tmp, 4);
+    bool init = (KALMAN_RD(init_addr[n]) & 0x1u) != 0u;
     *s = {fx, fy, fvx, fvy, init};
 }
 
-// 내부 대기 헬퍼
 static bool kalman_wait_done(void)
 {
     u32 to = 500000;
-    while (!(KALMAN_RD(0x00) & AP_DONE)) {
+    while (!(KALMAN_RD(KALMAN_ADDR_AP_CTRL) & AP_DONE)) {
         if ((to & 0x3FFu) == 0u) uart_accumulate();
         if (--to == 0) {
             xil_printf("[WARN] Kalman IP timeout\n");
@@ -512,142 +554,72 @@ static bool kalman_wait_done(void)
     return true;
 }
 
-// IP 초기화: 빈 입력 + reset=1 → 내부 상태 전부 클리어
+// reset=1로 IP 실행 → 내부 상태(위치·공분산) 전부 초기화
 static void kalman_ip_reset(void)
 {
     for (int n = 0; n < MAX_TARGETS; ++n) {
-        KALMAN_WR(0x20 + 8*n,     0u);
-        KALMAN_WR(0x20 + 8*n + 4, 0u);
+        RadarTarget_t zero = {0, 0, 0, false};
+        kalman_write_target(n, &zero);
     }
-    KALMAN_WR(0x10, 1u);    // reset = true
-    KALMAN_WR(0x00, AP_START);
+    KALMAN_WR(KALMAN_ADDR_RESET_DATA, 1u);
+    KALMAN_WR(KALMAN_ADDR_AP_CTRL, AP_START);
     kalman_wait_done();
-    KALMAN_WR(0x10, 0u);    // reset 플래그 해제 (다음 run 에서 0 유지)
+    KALMAN_WR(KALMAN_ADDR_RESET_DATA, 0u);
 }
 
-// IP 실행: 표적 입력 → 처리 → 상태 읽기
 static void kalman_ip_run(const RadarTarget_t* tgt, KalmanState_t* out)
 {
     for (int n = 0; n < MAX_TARGETS; ++n)
         kalman_write_target(n, &tgt[n]);
-    // reset 레지스터는 kalman_ip_reset() 이후 0으로 유지됨
-    KALMAN_WR(0x00, AP_START);
+    KALMAN_WR(KALMAN_ADDR_AP_CTRL, AP_START);
     if (!kalman_wait_done()) return;
     for (int n = 0; n < MAX_TARGETS; ++n)
         kalman_read_state(n, &out[n]);
 }
 
-// ULN2003 모터 PID 상태 (pan/tilt 각축 독립)
-static float g_pan_prev_err  = 0.0f;
-static float g_tilt_prev_err = 0.0f;
-static float g_pan_cmd       = 0.0f;
-static float g_tilt_cmd      = 0.0f;
-static bool  g_had_target     = false; // 직전 프레임 표적 유무 (acquireRampScale 판별)
-static int   g_host_cmd_cooldown = 0; // 명령 실행 보호 (IP 이동 완료 대기)
-static int   g_ai_lock_frames    = 0; // AI 추적 모드 유지 — 레이더 오버라이드 차단
-#define HOST_CMD_COOLDOWN_FRAMES  2   // 2프레임(66ms): 모터 이동 완료 대기
-#define AI_LOCK_FRAMES            4   // 4프레임(132ms): C++ 다음 명령 도착 전까지 레이더 개입 방지
+// ============================================================
+//  모터 제어 상태 변수
+// ============================================================
+static int   g_host_cmd_cooldown = 0;
+static int   g_ai_lock_frames    = 0;
+// IP 이동 완료까지 최소 2프레임(66ms) 보호 → 다음 명령이 이전 이동과 충돌 방지
+#define HOST_CMD_COOLDOWN_FRAMES  2
+// AI 명령 후 레이더가 즉시 오버라이드하지 않도록 4프레임(132ms) 잠금
+#define AI_LOCK_FRAMES            4
+
 
 // ============================================================
-//  레이더 방위각 → 픽셀 변환 (angle_to_px)
+//  레이더 방위각 → Pan 절대 스텝 직변환 (PID 없음)
+//  rang_lp: LP 필터 적용된 방위각 (0.1도 단위)
 // ============================================================
-static int angle_to_px(int16_t at_10)
+static const float RADAR_STEPS_PER_DECDEG = 4096.0f / 3600.0f;
+// ±2 step(≈0.18도) 이내 미세 진동 무시
+#define RADAR_DEADBAND_STEPS  2
+
+// 정지 상태에서 첫 포착 시 충격 방지용 가속 램프
+#define RADAR_ACCEL_INIT_STEP  8
+#define RADAR_ACCEL_INC        6
+static int g_radar_accel_step = RADAR_ACCEL_INIT_STEP;
+
+static void motor_update_radar_abs(float rang_lp_val)
 {
-    float deg = at_10 / 10.0f;
-    float normalized_x = deg / (CAM_HFOV_DEG / 2.0f);
-    int px = (int)((normalized_x + 1.0f) / 2.0f * CAM_W_PX);
-    
-    if(px < 0) px = 0; 
-    if(px >= CAM_W_PX) px = CAM_W_PX - 1;
-    return px;
-}
-
-// ============================================================
-//  ULN2003 모터 제어 (HLS IP AXI4-Lite)
-//  control.cpp ControlLoop / AxisController 로직 이식
-// ============================================================
-
-// PID → 슬루 → 스텝 변환 (단일 축)
-// control.cpp AxisController::stepFromCommand + PIDController::update 이식
-// ramp_scale: 1.0f 평상시, MOTOR_ACQUIRE_RAMP 첫 표적 획득 시 (control.cpp acquireRampScale)
-static int motor_pid_step(
-    float err_px, float frame_half,
-    int deadband, float kp, float kd,
-    int min_step, int max_step,
-    float* prev_err, float* smooth_cmd,
-    float ramp_scale)
-{
-    float ramp = MOTOR_CMD_RAMP * MOTOR_DT * ramp_scale;
-
-    if (fabsf(err_px) <= (float)deadband) {
-        // 데드밴드 내 → 명령을 0으로 서서히 감속 (control.cpp: no target branch)
-        if      (*smooth_cmd >  ramp) *smooth_cmd -= ramp;
-        else if (*smooth_cmd < -ramp) *smooth_cmd += ramp;
-        else                          *smooth_cmd  = 0.0f;
-        *prev_err = 0.0f;
-        return 0;
-    }
-
-    float norm  = err_px / (frame_half > 0.1f ? frame_half : 0.1f);
-    float deriv = (norm - *prev_err) / MOTOR_DT;
-    *prev_err   = norm;
-
-    float target = kp * norm + kd * deriv;
-    if (target >  1.0f) target =  1.0f;
-    if (target < -1.0f) target = -1.0f;
-
-    // 슬루 리미트 (control.cpp slewLimit)
-    float diff = target - *smooth_cmd;
-    if      (diff >  ramp) *smooth_cmd += ramp;
-    else if (diff < -ramp) *smooth_cmd -= ramp;
-    else                   *smooth_cmd  = target;
-
-    float cmd = *smooth_cmd;
-    if (fabsf(cmd) < 1e-3f) return 0;
-
-    // 최소 스텝 비율 보정 (control.cpp AxisController::normalizeCommandFloor)
-    float span      = (float)(max_step - min_step);
-    float min_ratio = (float)min_step / ((float)min_step + span);
-    float abs_cmd   = fabsf(cmd) < min_ratio ? min_ratio : fabsf(cmd);
-
-    int step = min_step + (int)(span * abs_cmd);
-    return cmd > 0.0f ? step : -step;
-}
-
-// ============================================================
-//  하이브리드 모터 제어
-//    Pan  : 레이더 방위각 오차 → 기존 PID 경로
-//    Tilt : 호스트 카메라 직접 스텝 (g_host_tilt_steps)
-// ============================================================
-static void motor_update_hybrid(int pan_err_x, bool has_target, int direct_tilt_steps)
-{
-    float ramp = (has_target && !g_had_target) ? MOTOR_ACQUIRE_RAMP : 1.0f;
-    g_had_target = has_target;
-
-    // Pan: 기존 PID (레이더 방위각 오차 기반) — IP 대기 중에도 slew 상태 진행
-    int dpan = motor_pid_step((float)pan_err_x, (float)(CAM_W_PX / 2),
-                              MOTOR_PAN_DEADBAND, MOTOR_KP, MOTOR_KD,
-                              MOTOR_PAN_MIN_STEP, MOTOR_PAN_MAX_STEP,
-                              &g_pan_prev_err, &g_pan_cmd, ramp);
-
-    // Tilt: 호스트 직접 스텝 (MOTOR_TILT_MIN_STEP 미만은 데드밴드로 무시)
-    int dtilt = 0;
-    if (abs(direct_tilt_steps) >= MOTOR_TILT_MIN_STEP) {
-        dtilt = direct_tilt_steps;
-        if (dtilt >  MOTOR_TILT_MAX_STEP) dtilt =  MOTOR_TILT_MAX_STEP;
-        if (dtilt < -MOTOR_TILT_MAX_STEP) dtilt = -MOTOR_TILT_MAX_STEP;
-    }
-    // 호스트 모드에서 tilt PID 상태 초기화 (모드 전환 시 글리치 방지)
-    g_tilt_prev_err = 0.0f;
-    g_tilt_cmd      = 0.0f;
-
-    if (dpan == 0 && dtilt == 0) return;
-
-    // IP 실행 중이면 누적하지 않음 — 완료 시 최신 1프레임치만 적용 (연쇄 지연 방지)
     if (!(MOTOR_RD(0x00) & AP_IDLE)) return;
 
-    g_motor_abs_pan  += dpan;
-    g_motor_abs_tilt += dtilt;
+    int target_pan = (int)(rang_lp_val * RADAR_STEPS_PER_DECDEG);
+    int delta      = target_pan - g_motor_abs_pan;
+
+    if (delta >= -RADAR_DEADBAND_STEPS && delta <= RADAR_DEADBAND_STEPS) {
+        g_radar_accel_step = RADAR_ACCEL_INIT_STEP;
+        return;
+    }
+
+    if (g_radar_accel_step > MOTOR_PAN_MAX_STEP) g_radar_accel_step = MOTOR_PAN_MAX_STEP;
+    int clamp = g_radar_accel_step;
+    if (delta >  clamp) delta =  clamp;
+    if (delta < -clamp) delta = -clamp;
+    g_radar_accel_step += RADAR_ACCEL_INC;
+
+    g_motor_abs_pan += delta;
 
     MOTOR_WR(0x10, (u32)g_motor_abs_pan);
     MOTOR_WR(0x18, (u32)g_motor_abs_tilt);
@@ -656,8 +628,8 @@ static void motor_update_hybrid(int pan_err_x, bool has_target, int direct_tilt_
 }
 
 // ============================================================
-//  펜딩 큐 실행기 — 수동(M:1+P:/T:) 및 절대좌표(A:) 공용
-//  MAX_STEP씩 쪼개어 실행 → 명령 유실 없이 모든 잔량 소진 보장
+//  수동(M:1+P:/T:) 및 절대좌표(A:) 공용 펜딩 큐 실행기
+//  MAX_STEP씩 분할 실행 → 모든 잔량 소진까지 유실 없음
 // ============================================================
 static bool motor_try_move_pending(int* ppan, int* ptilt)
 {
@@ -677,51 +649,48 @@ static bool motor_try_move_pending(int* ppan, int* ptilt)
     g_motor_abs_pan  += dpan;
     g_motor_abs_tilt += dtilt;
 
+    u32 speed = (u32)MOTOR_SPEED_DELAY;
+
     MOTOR_WR(0x10, (u32)g_motor_abs_pan);
     MOTOR_WR(0x18, (u32)g_motor_abs_tilt);
-    MOTOR_WR(0x20, MOTOR_SPEED_DELAY);
+    MOTOR_WR(0x20, speed);
     MOTOR_WR(0x00, AP_START);
     return true;
 }
 
 // ============================================================
-//  AI 카메라 PID 모드 — bbox 픽셀 오차 → FPGA PID → Pan+Tilt 스텝
-//  PC는 bbox 중심 오차(ex, ey)만 전송. PID/슬루/스텝 계산은 FPGA 전담.
-//  ex: (center_x - frame_w/2) / (frame_w/2) * 160  (320px 기준 스케일)
-//  ey: (center_y - frame_h/2) / (frame_h/2) * 120  (240px 기준 스케일)
+//  AI bbox 픽셀 오차 → 절대 스텝 직변환 이동
+//  28BYJ-48: STEPS_PER_PX ≈ 2.134 step/px (60° HFOV / 320px)
+//  PID 없음: 오차를 스텝으로 직접 변환 후 한 번에 이동
 // ============================================================
-static void motor_update_ai_bbox(int bbox_ex, int bbox_ey)
+static void motor_update_ai_abs(int bbox_ex, int bbox_ey)
 {
-    g_had_target = true;
+    if (!(MOTOR_RD(0x00) & AP_IDLE)) return;
 
-    int dpan = motor_pid_step(
-        (float)bbox_ex, (float)(CAM_W_PX / 2),
-        MOTOR_PAN_DEADBAND,  MOTOR_KP, MOTOR_KD,
-        MOTOR_PAN_MIN_STEP,  MOTOR_PAN_MAX_STEP,
-        &g_pan_prev_err, &g_pan_cmd, 1.0f);
+    if (bbox_ex > -CAM_DEADBAND_PX && bbox_ex < CAM_DEADBAND_PX &&
+        bbox_ey > -CAM_DEADBAND_PX && bbox_ey < CAM_DEADBAND_PX) return;
 
-    int dtilt = motor_pid_step(
-        (float)bbox_ey, (float)(CAM_H_PX / 2),
-        MOTOR_TILT_DEADBAND, MOTOR_KP, MOTOR_KD,
-        MOTOR_TILT_MIN_STEP, MOTOR_TILT_MAX_STEP,
-        &g_tilt_prev_err, &g_tilt_cmd, 1.0f);
+    // 픽셀 오차 → 스텝 변환: 부호 절삭(truncate) 방지를 위해 반올림
+    int dpan  = (int)((float)bbox_ex * STEPS_PER_PX + (bbox_ex >= 0 ? 0.5f : -0.5f));
+    int dtilt = (int)((float)bbox_ey * STEPS_PER_PX + (bbox_ey >= 0 ? 0.5f : -0.5f));
+
+    // 1프레임 내 완료 가능 스텝으로 클램프 (탈조 방지)
+    if (dpan  >  MOTOR_PAN_MAX_STEP)  dpan  =  MOTOR_PAN_MAX_STEP;
+    if (dpan  < -MOTOR_PAN_MAX_STEP)  dpan  = -MOTOR_PAN_MAX_STEP;
+    if (dtilt >  MOTOR_TILT_MAX_STEP) dtilt =  MOTOR_TILT_MAX_STEP;
+    if (dtilt < -MOTOR_TILT_MAX_STEP) dtilt = -MOTOR_TILT_MAX_STEP;
 
     if (dpan == 0 && dtilt == 0) return;
-    if (!(MOTOR_RD(0x00) & AP_IDLE)) return;
 
     g_motor_abs_pan  += dpan;
     g_motor_abs_tilt += dtilt;
 
+    u32 speed = (u32)MOTOR_SPEED_DELAY;
     MOTOR_WR(0x10, (u32)g_motor_abs_pan);
     MOTOR_WR(0x18, (u32)g_motor_abs_tilt);
-    MOTOR_WR(0x20, MOTOR_SPEED_DELAY);
+    MOTOR_WR(0x20, speed);
     MOTOR_WR(0x00, AP_START);
 }
-
-// ============================================================
-//  MTI(영상 모션 감지) 서브시스템 제거됨 → legacy/mti_subsystem/ (2026-06-01)
-//  사유: PC YOLO 경로와 중복, Mock 상태(죽은 코드). 부활법은 해당 폴더 README 참조.
-// ============================================================
 
 // ============================================================
 //  메인 루프
@@ -755,17 +724,17 @@ int main(void)
     uint16_t rdist     = 0;
     int16_t  rang      = 0;
     int      radar_age = RADAR_STALE_FRAMES;
-    static float rang_lp = 0.0f;   // rang 저역통과 필터 상태 (지터 억제)
+    // LP 필터 상태: α=0.4로 레이더 좌우 지터 억제 (KD항 미분 증폭 방지)
+    static float rang_lp = 0.0f;
 
     while(true){
 
-        // 1. 레이더 UART 고속 수신 및 파싱 (지연 제거 완벽 적용)
+        // 1. 레이더 UART 수신 및 최신 패킷 파싱
         uart_accumulate();
         if(uart_parse(rtgt, &rvc)){
             radar_age = 0;
             if(rvc>0) {
                 process_radar_target(rtgt[0], &rdist, &rang);
-                // LP 필터 (α=0.4): 레이더 좌표 지터 억제, KD 항 진동 방지
                 rang_lp = 0.4f * (float)rang + 0.6f * rang_lp;
                 rang = (int16_t)rang_lp;
             }
@@ -775,10 +744,11 @@ int main(void)
             rvc = 0;
             rdist = 0;
             rang = 0;
+            rang_lp = 0.0f;  // stale 후 재포착 시 잘못된 각도에서 수렴하는 헌팅 방지
             memset(rtgt, 0, sizeof(rtgt));
         }
 
-        // 2. 칼만 필터 예측/보정
+        // 2. 칼만 필터 예측·보정
         kalman_ip_run(rtgt, ks);
 
         // 3. 모터 제어 — 우선순위: 수동(M:1) > 절대좌표(A:) > AI bbox > 레이더 > 정지
@@ -786,45 +756,30 @@ int main(void)
         host_parse_commands();
 
         if (g_manual_mode) {
-            // 수동 캘리브레이션: P:/T: 펜딩 소진 (명령 유실 없음, 레이더 차단)
-            if (motor_try_move_pending(&g_manual_pending_pan, &g_manual_pending_tilt)) {
-                g_pan_prev_err  = 0.0f; g_pan_cmd  = 0.0f;
-                g_tilt_prev_err = 0.0f; g_tilt_cmd = 0.0f;
-            }
+            motor_try_move_pending(&g_manual_pending_pan, &g_manual_pending_tilt);
         } else if (g_abs_pending_pan != 0 || g_abs_pending_tilt != 0) {
-            // 절대좌표 이동: A: 명령 펜딩 소진 (pose table 기반 좌표 제어)
-            if (motor_try_move_pending(&g_abs_pending_pan, &g_abs_pending_tilt)) {
+            if (motor_try_move_pending(&g_abs_pending_pan, &g_abs_pending_tilt))
                 g_host_cmd_cooldown = HOST_CMD_COOLDOWN_FRAMES;
-                g_pan_prev_err  = 0.0f; g_pan_cmd  = 0.0f;
-                g_tilt_prev_err = 0.0f; g_tilt_cmd = 0.0f;
-            }
         } else if (g_host_bbox_valid && g_host_cmd_cooldown == 0) {
-            // AI 추적 모드: PC bbox 오차 → FPGA PID → Pan+Tilt
-            motor_update_ai_bbox(g_host_bbox_ex, g_host_bbox_ey);
+            motor_update_ai_abs(g_host_bbox_ex, g_host_bbox_ey);
             g_host_cmd_cooldown = HOST_CMD_COOLDOWN_FRAMES;
             g_ai_lock_frames    = AI_LOCK_FRAMES;
         } else if (g_host_cmd_cooldown > 0) {
-            // 모터 이동 완료 대기 — 레이더 개입 없음
             g_host_cmd_cooldown--;
             if (g_ai_lock_frames > 0) g_ai_lock_frames--;
         } else if (g_ai_lock_frames > 0) {
-            // AI 잠금 중 — 레이더 오버라이드 차단
             g_ai_lock_frames--;
         } else if (rvc > 0) {
-            // 레이더 단독 모드: AI 잠금 완전 해제 후에만 진입
-            motor_update_hybrid(angle_to_px(rang) - CAM_W_PX / 2, true, 0);
-        } else {
-            g_had_target = false;
+            motor_update_radar_abs(rang_lp);
         }
+        // 매 프레임 끝 리셋: PC가 30Hz로 재전송하지 않으면 다음 프레임은 bbox 없음으로 처리
         g_host_bbox_valid = false;
 
-        // 💡 [아키텍트 패치] Python UI 실시간 트래킹을 위해 레이더 좌표는 '매 프레임' 즉각 전송!
         if(rvc>0 && (fid % RADAR_LOG_PERIOD_FRAMES) == 0){
             xil_printf("[RADAR] T0:(%d,%d)mm spd=%dcm/s | dist=%dmm ang=%d.%ddeg\r\n",
                        rtgt[0].x, rtgt[0].y, rtgt[0].speed, rdist, rang/10, abs(rang%10));
         }
 
-        // 5. 콘솔 로그 출력 (누락 없이 전체 모듈 상태 보고)
 #if LOG_LEVEL >= 2
         if(fid % 30 == 0){
             xil_printf("\r\n[Frame %4d]===========================\r\n", fid);
@@ -832,8 +787,7 @@ int main(void)
                        (unsigned)g_rx_bytes, (unsigned)g_rx_packets,
                        (unsigned)g_rx_ring_overflows, (unsigned)g_rx_hw_overruns,
                        (unsigned)g_rx_hw_errors);
-            
-            // 칼만 필터 로그
+
             for(int i=0;i<MAX_TARGETS;++i){
                 if(!ks[i].init) continue;
                 xil_printf("  [KALM ] T%d (%d,%d)mm v=(%d,%d)cm/s\r\n",

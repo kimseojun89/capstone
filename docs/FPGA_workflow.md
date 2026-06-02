@@ -191,3 +191,99 @@ HLS 코드를 수정할 때마다 아래 전체 흐름을 반복해야 한다.
 | pan_out[3:0] | 미확인 (XDC 필요) | ULN2003 Pan 모터 IN1~IN4 |
 | tilt_out[3:0] | 미확인 (XDC 필요) | ULN2003 Tilt 모터 IN1~IN4 |
 | Camera 입력 | — (MTI 레거시화) | 영상 탐지는 PC YOLO 담당 |
+
+---
+
+## 실행 명령어 모음
+
+### 통합 메뉴 (권장)
+
+```powershell
+cd C:\Users\kimse\capstone
+.\go.ps1          # 번호 선택 메뉴
+```
+
+| 번호 | 동작 |
+|---|---|
+| 1 | Flash + 드론 추적 모드 |
+| 2 | 플래시 없이 드론 추적 |
+| 3 | Flash + 캘리브레이션 |
+| 4 | 플래시 없이 캘리브레이션 |
+| 5 | Preflight 점검만 |
+| 6 | 모터 즉시 정지 (M:0) |
+
+---
+
+### 개별 명령어
+
+**빌드**
+```powershell
+# FPGA 펌웨어 (ps_main.cpp → antidrone_app.elf)
+cd C:\Users\kimse\capstone
+.\scripts\run_build.bat
+
+# PC 트래커 (ptcamera_tracker.exe)
+.\scripts\build_win.bat
+```
+
+**실행**
+```powershell
+cd C:\Users\kimse\capstone\antidrone
+
+# 펌웨어 변경 후 첫 실행 (Flash 포함)
+.\run_system.ps1 -Flash -SerialPort COM4 -EnableMotor
+
+# 보드 이미 실행 중 (Flash 생략)
+.\run_system.ps1 -SerialPort COM4 -EnableMotor
+
+# 캘리브레이션 모드 (tracker 대신 capture script, COM4 충돌 없음)
+.\run_system.ps1 -Flash -SerialPort COM4 -Calibrate
+.\run_system.ps1 -SerialPort COM4 -Calibrate
+```
+
+**캘리브레이션 단계별**
+```powershell
+cd C:\Users\kimse\capstone
+
+# 1. ChArUco 보드 생성
+python scripts\pantilt_calibration\generate_charuco_board.py
+
+# 2. Intrinsic 이미지 캡처 (Space=저장, q=종료)
+python scripts\pantilt_calibration\capture_intrinsic_images.py --show-detections
+
+# 3. Intrinsic 캘리브레이션
+python scripts\pantilt_calibration\calibrate_intrinsics_charuco.py
+
+# 4. Pan/Tilt 데이터셋 캡처 (방향키=이동, Space=저장)
+python scripts\pantilt_calibration\capture_pantilt_motor_dataset.py --serial-port COM4 --show-detections
+
+# 5. Pose Table 생성
+python scripts\pantilt_calibration\estimate_pantilt_pose_table.py
+
+# 6. 안테나 평면 정의
+python scripts\pantilt_calibration\calibrate_antenna_plane.py --points "0,0,0;100,0,0;0,100,0"
+
+# 7. 절대좌표 모터 이동 테스트
+python scripts\pantilt_calibration\runtime_motor_control.py --serial-port COM4 --goto-antenna 50.0,30.0
+```
+
+**비상 명령**
+```powershell
+# 모터 즉시 정지
+python -c "import serial,time; s=serial.Serial('COM4',256000); s.write(b'M:0\n'); time.sleep(0.1); s.close()"
+
+# 보드 종료: 전원 스위치 OFF (FPGA는 SW 종료 명령 없음)
+```
+
+**캡처 스크립트 키 조작**
+
+| 키 | 동작 |
+|---|---|
+| `←` / `A` | pan -1도 |
+| `→` / `D` | pan +1도 |
+| `↑` / `W` | tilt +1도 |
+| `↓` / `S` | tilt -1도 |
+| `Space` | 현재 위치로 샘플 저장 |
+| `R` | 현재 위치를 0,0으로 재정의 |
+| `+` / `-` | 이동 단위 ±0.5도 조정 |
+| `q` / `ESC` | 종료 (M:0 자동 전송) |

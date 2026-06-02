@@ -5,63 +5,13 @@
 > - `Vitis/uln2003_controller.cpp` — HLS IP (PL 하드웨어)
 > - `antidrone/cpp/apps/ptcamera_tracker.cpp` — PC 트래커
 > - `antidrone/cpp/src/serial_port.cpp` — UART 통신
->
-> **최종 갱신:** 2026-06-01 (Phase 2 — FPGA-Only Control 반영)
-> 이 파일을 모터 제어 정본으로 사용한다.
 
----
-
-## 1. 시스템 아키텍처 (Phase 2 현재)
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    PC (Windows)                          │
-│  ptcamera_tracker.exe                                    │
-│  ┌──────────┐    ┌─────────────┐   ┌──────────────────┐ │
-│  │ YOLO v8x │───→│ ByteTrack   │───→│ serial_port.cpp  │ │
-│  │ 드론탐지 │    │ bbox 추출   │   │ "B:ex,ey\n" 전송 │ │
-│  └──────────┘    └─────────────┘   └────────┬─────────┘ │
-└───────────────────────────────────────────  │  ──────────┘
-                                              │ UART0 (256Kbps, COM4)
-┌─────────────────────────────────────────── │  ──────────┐
-│                PYNQ-Z2 (Zynq)              ▼             │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │              PS (ARM Cortex-A9) ps_main.cpp      │    │
-│  │                                                  │    │
-│  │  UART0 RX ──→ host_parse_commands()             │    │
-│  │                "B:ex,ey" 파싱 → motor_pid_step() │    │
-│  │                "P:/T:" 수동 모드 전용             │    │
-│  │                                                  │    │
-│  │  UART1 RX ──→ uart_parse() ──→ CORDIC ──→ rang  │    │
-│  │  (레이더)     30byte 패킷      극좌표변환         │    │
-│  │                                                  │    │
-│  │         ┌──── 상태머신 (4단계) ────┐             │    │
-│  │         │  1. AI(bbox_valid) PID   │             │    │
-│  │         │  2. 수동(M:1+P/T)        │             │    │
-│  │         │  3. 레이더 단독 PID      │             │    │
-│  │         │  4. 정지                 │             │    │
-│  │         └────────────┬────────────┘             │    │
-│  │                      │ AXI4-Lite                 │    │
-│  │  ┌───────────────────▼──────────────────────┐   │    │
-│  │  │  PL — uln2003_controller HLS IP           │   │    │
-│  │  │  target_pan/tilt → 하프스텝 시퀀스 구동   │   │    │
-│  │  │  pan_out[3:0] → PMODA → ULN2003 → Pan모터 │   │    │
-│  │  │  tilt_out[3:0]→ PMODB → ULN2003 → Tilt모터│  │    │
-│  │  └───────────────────────────────────────────┘   │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
-```
-
-**Phase 2 핵심 구조:**
-- PC는 bbox 중심 오차(ex, ey)만 전송 — `B:ex,ey\n`
-- PID 계산(Pan+Tilt 모두)은 FPGA가 담당
-- `P:/T:` 명령은 수동 캘리브레이션(`M:1` 모드) 전용으로 격하
 
 ---
 
 ## 2. HLS IP — `uln2003_controller` (PL 하드웨어)
 
-> `Vitis/uln2003_controller.cpp` — 86줄, HLS C 합성
+> `Vitis/uln2003_controller.cpp` — 85줄, HLS C 합성
 
 ### 2-1. 인터페이스
 
@@ -75,11 +25,15 @@ void uln2003_controller(
 )
 ```
 
+- `target_pan`, `target_tilt`, `speed_delay`는 `CTRL` AXI4-Lite 번들에 매핑된다.
+- `pan_out`, `tilt_out`은 `ap_none` 출력 포트이며 별도 핸드셰이크 없이 ULN2003 IN1~IN4 신호로 직접 연결한다.
+- `return`도 `CTRL` AXI4-Lite에 포함되어 `ap_start`, `ap_done`, `ap_idle` 제어 레지스터를 만든다.
+
 ### 2-2. AXI 레지스터 맵
 
 | 오프셋 | 레지스터 | 방향 | 용도 |
 |:---:|---|:---:|---|
-| `0x00` | ap_ctrl | R/W | bit0=AP_START, bit1=AP_DONE, bit2=AP_IDLE |
+| `0x00` | ap_ctrl | R/W | bit0=AP_START, bit1=AP_DONE, bit2=AP_IDLE, bit3=AP_READY |
 | `0x10` | target_pan | W | Pan 절대 스텝 목표 |
 | `0x18` | target_tilt | W | Tilt 절대 스텝 목표 |
 | `0x20` | speed_delay | W | `hw_delay()` 루프 카운트 (µs 아님) |
@@ -99,7 +53,10 @@ static int pan_idx  = 0;      // 하프스텝 시퀀스 인덱스 (0~7)
 static int tilt_idx = 0;
 ```
 
-> AP_START로 재호출되어도 이전 값이 유지 → PS가 **절대 위치**를 쓰면 IP는 차이만큼만 이동
+> IP가 다시 시작되어도 static 값은 하드웨어 상태로 유지된다. PS가 새 **절대 목표 스텝**을 쓰면 IP는 현재 위치와 목표의 차이만큼 이동한다.
+
+- `current_pan/current_tilt`: IP가 알고 있는 현재 절대 스텝 위치
+- `pan_idx/tilt_idx`: 다음 출력에 사용할 8상 하프스텝 시퀀스 인덱스
 
 ### 2-4. 28BYJ-48 하프스텝 시퀀스
 
@@ -110,6 +67,8 @@ const ap_uint<4> step_seq[8] = {
 };
 ```
 
+- 시퀀스는 ULN2003 입력 IN1~IN4에 그대로 출력되는 4비트 패턴이다.
+- 정방향 이동 시 인덱스는 `(idx + 1) % 8`, 역방향 이동 시 `(idx - 1 + 8) % 8`로 갱신한다.
 - 8상 시퀀스 1회전 = 5.625° → 기어비 1:64 → 출력축 **1스텝 ≈ 0.011°**
 - 360° = **4096 하프스텝**
 
@@ -117,14 +76,24 @@ const ap_uint<4> step_seq[8] = {
 
 ```cpp
 while (current_pan != target_pan || current_tilt != target_tilt) {
-    if (current_pan < target_pan)       { pan_idx = (pan_idx+1)%8; current_pan++; }
-    else if (current_pan > target_pan)  { pan_idx = (pan_idx-1+8)%8; current_pan--; }
-    // Tilt 동일
+    bool moved = false;
+
+    if (current_pan < target_pan)       { pan_idx = (pan_idx+1)%8; current_pan++; moved = true; }
+    else if (current_pan > target_pan)  { pan_idx = (pan_idx-1+8)%8; current_pan--; moved = true; }
+
+    if (current_tilt < target_tilt)      { tilt_idx = (tilt_idx+1)%8; current_tilt++; moved = true; }
+    else if (current_tilt > target_tilt) { tilt_idx = (tilt_idx-1+8)%8; current_tilt--; moved = true; }
+
     pan_out  = step_seq[pan_idx];
     tilt_out = step_seq[tilt_idx];
     if (moved) hw_delay(speed_delay);
 }
 ```
+
+- Pan과 Tilt 중 목표에 도달하지 않은 축만 1스텝씩 이동한다.
+- 두 축이 모두 이동해야 하는 경우 같은 루프 반복에서 각각 1스텝씩 갱신되므로 같은 `speed_delay` 간격으로 동시 구동된다.
+- 목표에 도달한 축은 마지막 `step_seq[idx]` 출력을 유지한다. 즉 코일 출력은 0으로 풀리지 않고 현재 상을 계속 유지한다.
+- 함수는 목표에 도달할 때까지 `while` 안에 머무르므로, PS는 다음 명령을 쓰기 전에 `ap_done/ap_idle` 확인 또는 충분한 대기 시간이 필요하다.
 
 ### 2-6. `hw_delay()` — 스텝 간 딜레이
 
@@ -138,6 +107,7 @@ void hw_delay(int delay_count) {
 
 - busy-wait 루프. `delay_count=200` 기준 실측 **≈ 0.57ms/step** (200MHz 클럭, 1루프≈2.825µs)
 - ⚠️ HLS 합성 설정 변경 시 재실측 필요
+- `speed_delay <= 0`이면 실질적인 대기 없이 루프가 진행되므로, 실제 모터 구동에서는 양수 값을 사용한다.
 
 ---
 
@@ -292,79 +262,6 @@ sendTiltDegrees(1.0) → T:+11\n
               = 33ms / 0.57ms ≈ 58
 ```
 
-### 속도 튜닝 전체 이력
-
-| SPEED_DELAY | ms/step | MAX_STEP | 각속도 | 비고 |
-|:---:|:---:|:---:|:---:|---|
-| 80000 | 226ms | 48 | — | 초기, 35° 이동 90초 |
-| 2000 | 5.6ms | 48 | ~13°/s | 35° ~2.2초 |
-| 500 | 1.4ms | 48 | ~44°/s | |
-| 300 | 0.85ms | 48 | ~67°/s | |
-| 300 | 0.85ms | 400 | ~94°/s | 2.7Hz 업데이트 — 끊김 |
-| 200 | 0.57ms | 400 | ~94°/s | MAX_STEP이 각속도와 무관함을 확인 |
-| **200** | **0.57ms** | **58** | **154°/s** | **현재 — 30Hz 연속, 부드럽고 빠름** |
-
-**탈조 발생 시 안전 복구:**
-```c
-#define MOTOR_SPEED_DELAY   300
-#define MOTOR_PAN_MAX_STEP  38
-#define MOTOR_TILT_MAX_STEP 38
-// → 101°/s, 30Hz, 탈조 없음
-```
-
----
-
-## 7. 수정 이력 (튜닝 기록)
-
-### 수정 1 — AP_IDLE 가드 위치 수정 (체감 속도 저하 해결)
-
-abs 누적 코드 **이전**에 AP_IDLE 체크를 배치하여 IP 실행 중 명령 누적에 의한 연쇄 지연 폭주 방지.
-
-```c
-// 이전: abs 누적 후 IDLE 체크 → IP 바쁠 때 abs가 계속 쌓임
-// 이후: IDLE 아니면 즉시 return → 최신 1프레임치만 적용
-if (!(MOTOR_RD(0x00) & AP_IDLE)) return;
-g_motor_abs_pan += dpan;
-MOTOR_WR(0x00, AP_START);
-```
-
-### 수정 2 — MOTOR_KP 상향 (각속도 개선)
-
-`KP=0.25` → `KP=1.5`. 오차 100px 기준 13스텝(26°/s) → 54스텝(111°/s).  
-`KP=2.0` 시험 시 진동 증가 → 1.5로 롤백 확정.
-
-### 수정 3 — rang LP 필터 추가 (Pan 좌우 진동 억제)
-
-```c
-rang_lp = 0.4f * (float)rang + 0.6f * rang_lp;  // α=0.4
-rang = (int16_t)rang_lp;
-```
-
-- α=0.4: ~2.5프레임(82ms) 지연, 노이즈 억제+추적속도 절충
-- 느린 표적엔 α 낮춤, 빠른 표적엔 높임으로 수동 조정 가능
-
-### 수정 4 — MOTOR_KD 제거 (Pan 진동 해결)
-
-레이더 노이즈를 미분항이 증폭해 매 프레임 방향반전 → `KD=0.0f`로 제거.  
-슬루 리미터(`MOTOR_CMD_RAMP`)가 급격한 명령 변화를 이미 완충하므로 D항 불필요.
-
-### 수정 5 — 수동 모드 `M:` 명령 추가
-
-`M:1\n` → `g_manual_mode=true` → minStep(5) 제한 해제, 1스텝(≈0.011°) 정밀 이동 가능.  
-캘리브레이션 및 점검 전용.
-
-### 수정 6 — Tilt 단독 이동 허용
-
-AI 추적 진입 조건: `pan_steps != 0` → `(pan||tilt) != 0`  
-`T:+N\n` 단독 전송으로 Tilt 이동 가능.
-
-### 수정 7 — Phase 2: B:ex,ey 프로토콜 도입 (2026-06-01)
-
-PC PID(`control.cpp`) 제거, FPGA PID 통일.  
-- PC: `sendBBox(ex, ey)` → `B:ex,ey\n` 전송
-- FPGA: `motor_update_ai_bbox()` — Pan+Tilt 모두 `motor_pid_step()` 처리
-- 이중 PID 구조(AI모드 PC PID vs 레이더모드 FPGA PID)로 인한 모드 간 응답 특성 차이 해소
-
 ---
 
 ## 8. 하드웨어 배선
@@ -392,7 +289,7 @@ Row 1  │  JB1P  W14  IN1  │
 Row 2  │  JB1N  Y14  IN2  │
 Row 3  │  JB2P  T11  IN3  │
 Row 4  │  JB2N  T10  IN4  │
-Row 5  │       GND        │
+Row 5  │       GND        │ 
        └──────────────────┘
 ```
 
