@@ -646,7 +646,7 @@ static void motor_update_hybrid(int pan_err_x, bool has_target, int direct_tilt_
     // IP 실행 중이면 누적하지 않음 — 완료 시 최신 1프레임치만 적용 (연쇄 지연 방지)
     if (!(MOTOR_RD(0x00) & AP_IDLE)) return;
 
-    g_motor_abs_pan  += dpan;
+    g_motor_abs_pan  -= dpan;
     g_motor_abs_tilt += dtilt;
 
     MOTOR_WR(0x10, (u32)g_motor_abs_pan);
@@ -674,7 +674,7 @@ static bool motor_try_move_pending(int* ppan, int* ptilt)
     *ppan  -= dpan;
     *ptilt -= dtilt;
 
-    g_motor_abs_pan  += dpan;
+    g_motor_abs_pan  -= dpan;
     g_motor_abs_tilt += dtilt;
 
     MOTOR_WR(0x10, (u32)g_motor_abs_pan);
@@ -709,7 +709,7 @@ static void motor_update_ai_bbox(int bbox_ex, int bbox_ey)
     if (dpan == 0 && dtilt == 0) return;
     if (!(MOTOR_RD(0x00) & AP_IDLE)) return;
 
-    g_motor_abs_pan  += dpan;
+    g_motor_abs_pan  -= dpan;
     g_motor_abs_tilt += dtilt;
 
     MOTOR_WR(0x10, (u32)g_motor_abs_pan);
@@ -765,6 +765,7 @@ int main(void)
             radar_age = 0;
             if(rvc>0) {
                 process_radar_target(rtgt[0], &rdist, &rang);
+                rang = -rang;  // 레이더 x축 좌향 양수 → 표준 우향 양수 변환
                 // LP 필터 (α=0.4): 레이더 좌표 지터 억제, KD 항 진동 방지
                 rang_lp = 0.4f * (float)rang + 0.6f * rang_lp;
                 rang = (int16_t)rang_lp;

@@ -2148,21 +2148,21 @@
       },
       "uln2003_controller_0": {
         "vlnv": "xilinx.com:hls:uln2003_controller:1.0",
-        "ip_revision": "2114634707",
+        "ip_revision": "2114636285",
         "xci_name": "antidrone_bd_uln2003_controller_0_0",
         "xci_path": "ip\\antidrone_bd_uln2003_controller_0_0\\antidrone_bd_uln2003_controller_0_0.xci",
         "inst_hier_path": "uln2003_controller_0"
       },
       "kalman_filter_0": {
         "vlnv": "xilinx.com:hls:kalman_filter:1.0",
-        "ip_revision": "2114634708",
+        "ip_revision": "2114636283",
         "xci_name": "antidrone_bd_kalman_filter_0_1",
         "xci_path": "ip\\antidrone_bd_kalman_filter_0_1\\antidrone_bd_kalman_filter_0_1.xci",
         "inst_hier_path": "kalman_filter_0"
       },
       "cordic_polar_0": {
         "vlnv": "xilinx.com:hls:cordic_polar:1.0",
-        "ip_revision": "2114634709",
+        "ip_revision": "2114636281",
         "xci_name": "antidrone_bd_cordic_polar_0_1",
         "xci_path": "ip\\antidrone_bd_cordic_polar_0_1\\antidrone_bd_cordic_polar_0_1.xci",
         "inst_hier_path": "cordic_polar_0"
