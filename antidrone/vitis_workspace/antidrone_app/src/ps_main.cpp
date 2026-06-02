@@ -59,13 +59,22 @@
 #define MOTOR_WR(off, v)  Xil_Out32(MOTOR_BASEADDR + (off), (u32)(v))
 #define MOTOR_RD(off)     Xil_In32 (MOTOR_BASEADDR + (off))
 
-// 28BYJ-48 half-step 사양 (pan/tilt 중력 부하 없음 → 동일 속도)
+// 28BYJ-48 half-step 사양
 #define MOTOR_STEPS_PER_REV     4096         // 1회전 = 4096 step
-// hw_delay 루프카운트: 300 → 0.85ms/step
-#define MOTOR_SPEED_DELAY       300          // pan/tilt 공통
+// hw_delay 루프카운트 실측 기준 (PL 100MHz 기준):
+//   200 → 0.57ms/step ≈ 1754pps (탈조 없는 최고속, 구 코드 실측)
+//   300 → 0.85ms/step ≈ 1176pps (보수적 안전값)
+//   588 → 1.67ms/step ≈  600pps (28BYJ-48 공식 스펙 최대, 가장 안전)
+// pan 단독 이동(레이더): 200 사용.  tilt 포함(AI bbox, 수동, A:): 300 사용.
+#define MOTOR_PAN_SPEED_DELAY   200          // pan 단독 이동 시 (레이더 추적)
+#define MOTOR_TILT_SPEED_DELAY  300          // tilt 포함 이동 시 (AI bbox, 수동, A:)
 // 1프레임(33ms) 내 완료 가능 최대 스텝: 33ms / 0.85ms ≈ 38
 #define MOTOR_PAN_MAX_STEP      38
 #define MOTOR_TILT_MAX_STEP     38
+// 모터 물리 방향 부호: +1=정방향, -1=배선/기어 역방향
+// tilt 역방향 확인됨(-1). pan은 실보드에서 확인 후 조정.
+#define MOTOR_PAN_DIR           1
+#define MOTOR_TILT_DIR         -1
 // 절대좌표 직변환: (4096/360) × 60° / 320px ≈ 2.134 step/px
 // 4:3 화면(240px VFOV≈45°) 기준 수직도 동일: (4096/360) × 45° / 240px ≈ 2.134
 #define STEPS_PER_DEG           (4096.0f / 360.0f)
@@ -85,7 +94,12 @@
 
 #define CORDIC_WR(off, v)  Xil_Out32(CORDIC_BASEADDR + (off), (u32)(v))
 #define CORDIC_RD(off)     Xil_In32 (CORDIC_BASEADDR + (off))
-// 레지스터: 0x10=x_in, 0x18=y_in, 0x20=distance(out), 0x30=angle_deg(out)
+// 레지스터 맵:
+//   0x10=x_in(W), 0x18=y_in(W), 0x20=distance(R)
+//   angle_deg(R): HLS explicit offset → 0x30 (새 bitstream)
+//                 HLS auto-assign    → 0x28 (구 bitstream)
+//   현재 bitstream이 구버전이면 아래 값을 0x28 로 변경할 것
+#define CORDIC_ANGLE_REG  0x30
 
 // ============================================================
 //  Kalman Filter IP (AXI4-Lite, 0x40010000)
@@ -468,8 +482,8 @@ static void cordic_ip_call(int16_t xi, int16_t yi,
             *dm = 0; *at = 0; return;
         }
     }
-    *dm = (uint16_t)(CORDIC_RD(0x20) & 0xFFFFu);
-    *at = (int16_t) (CORDIC_RD(0x30) & 0xFFFFu);
+    *dm = (uint16_t)(CORDIC_RD(0x20)            & 0xFFFFu);
+    *at = (int16_t) (CORDIC_RD(CORDIC_ANGLE_REG) & 0xFFFFu);
 }
 
 static void process_radar_target(const RadarTarget_t& t, uint16_t* dist_mm, int16_t* yaw_deg10)
@@ -619,11 +633,11 @@ static void motor_update_radar_abs(float rang_lp_val)
     if (delta < -clamp) delta = -clamp;
     g_radar_accel_step += RADAR_ACCEL_INC;
 
-    g_motor_abs_pan += delta;
+    g_motor_abs_pan += MOTOR_PAN_DIR * delta;
 
     MOTOR_WR(0x10, (u32)g_motor_abs_pan);
     MOTOR_WR(0x18, (u32)g_motor_abs_tilt);
-    MOTOR_WR(0x20, MOTOR_SPEED_DELAY);
+    MOTOR_WR(0x20, MOTOR_PAN_SPEED_DELAY);  // 레이더=pan 단독 이동 → pan 최고속 적용
     MOTOR_WR(0x00, AP_START);
 }
 
@@ -649,7 +663,7 @@ static bool motor_try_move_pending(int* ppan, int* ptilt)
     g_motor_abs_pan  += dpan;
     g_motor_abs_tilt += dtilt;
 
-    u32 speed = (u32)MOTOR_SPEED_DELAY;
+    u32 speed = (u32)MOTOR_TILT_SPEED_DELAY;  // tilt 포함 이동 → 보수적 속도
 
     MOTOR_WR(0x10, (u32)g_motor_abs_pan);
     MOTOR_WR(0x18, (u32)g_motor_abs_tilt);
@@ -670,9 +684,9 @@ static void motor_update_ai_abs(int bbox_ex, int bbox_ey)
     if (bbox_ex > -CAM_DEADBAND_PX && bbox_ex < CAM_DEADBAND_PX &&
         bbox_ey > -CAM_DEADBAND_PX && bbox_ey < CAM_DEADBAND_PX) return;
 
-    // 픽셀 오차 → 스텝 변환: 부호 절삭(truncate) 방지를 위해 반올림
-    int dpan  = (int)((float)bbox_ex * STEPS_PER_PX + (bbox_ex >= 0 ? 0.5f : -0.5f));
-    int dtilt = (int)((float)bbox_ey * STEPS_PER_PX + (bbox_ey >= 0 ? 0.5f : -0.5f));
+    // 픽셀 오차 → 스텝 변환 (MOTOR_PAN_DIR/TILT_DIR로 물리 방향 보정)
+    int dpan  = MOTOR_PAN_DIR  * (int)((float)bbox_ex * STEPS_PER_PX + (bbox_ex >= 0 ? 0.5f : -0.5f));
+    int dtilt = MOTOR_TILT_DIR * (int)((float)bbox_ey * STEPS_PER_PX + (bbox_ey >= 0 ? 0.5f : -0.5f));
 
     // 1프레임 내 완료 가능 스텝으로 클램프 (탈조 방지)
     if (dpan  >  MOTOR_PAN_MAX_STEP)  dpan  =  MOTOR_PAN_MAX_STEP;
@@ -685,7 +699,7 @@ static void motor_update_ai_abs(int bbox_ex, int bbox_ey)
     g_motor_abs_pan  += dpan;
     g_motor_abs_tilt += dtilt;
 
-    u32 speed = (u32)MOTOR_SPEED_DELAY;
+    u32 speed = (u32)MOTOR_TILT_SPEED_DELAY;  // tilt 포함 이동 → 보수적 속도
     MOTOR_WR(0x10, (u32)g_motor_abs_pan);
     MOTOR_WR(0x18, (u32)g_motor_abs_tilt);
     MOTOR_WR(0x20, speed);
@@ -712,7 +726,7 @@ int main(void)
     kalman_ip_reset();
     xil_printf("[+] Kalman IP (PL HLS) OK\n");
 
-    MOTOR_WR(0x10, 0); MOTOR_WR(0x18, 0); MOTOR_WR(0x20, MOTOR_SPEED_DELAY);
+    MOTOR_WR(0x10, 0); MOTOR_WR(0x18, 0); MOTOR_WR(0x20, MOTOR_TILT_SPEED_DELAY);
     MOTOR_WR(0x00, AP_START);
     xil_printf("[+] Motor IP OK (home position)\n\n");
 
