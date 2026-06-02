@@ -61,19 +61,19 @@
 
 // 28BYJ-48 half-step 사양
 #define MOTOR_STEPS_PER_REV     4096         // 1회전 = 4096 step
-// hw_delay 루프카운트 실측 기준 (PL 100MHz 기준):
-//   200 → 0.57ms/step ≈ 1754pps (탈조 없는 최고속, 구 코드 실측)
-//   300 → 0.85ms/step ≈ 1176pps (보수적 안전값)
-//   588 → 1.67ms/step ≈  600pps (28BYJ-48 공식 스펙 최대, 가장 안전)
-// pan 단독 이동(레이더): 200 사용.  tilt 포함(AI bbox, 수동, A:): 300 사용.
-#define MOTOR_PAN_SPEED_DELAY   200          // pan 단독 이동 시 (레이더 추적)
-#define MOTOR_TILT_SPEED_DELAY  300          // tilt 포함 이동 시 (AI bbox, 수동, A:)
+// speed_delay 계수 기준 (uln2003_controller IP: 실제 지연 = delay × 280 사이클 @ 100MHz):
+//   [주의] 구 hw_delay(volatile dummy++) 구현은 HLS 2023.2에서 최적화 제거됨 → 재합성 필수
+//   200 →  56,000 cycles ≈ 0.56ms/step ≈ 1786pps (탈조 없는 최고속)
+//   300 →  84,000 cycles ≈ 0.84ms/step ≈ 1190pps (권장 안전값)
+//   588 → 164,640 cycles ≈ 1.65ms/step ≈  606pps (28BYJ-48 공식 스펙 안전값)
+#define MOTOR_PAN_SPEED_DELAY   300          // pan 단독 이동 시 (레이더 추적)
+#define MOTOR_TILT_SPEED_DELAY  200          // tilt 포함 이동 시 (AI bbox, 수동, A:)
 // 1프레임(33ms) 내 완료 가능 최대 스텝: 33ms / 0.85ms ≈ 38
 #define MOTOR_PAN_MAX_STEP      38
 #define MOTOR_TILT_MAX_STEP     38
 // 모터 물리 방향 부호: +1=정방향, -1=배선/기어 역방향
-// tilt 역방향 확인됨(-1). pan은 실보드에서 확인 후 조정.
-#define MOTOR_PAN_DIR           1
+// 실보드 확인 완료: pan/tilt 모두 역방향(-1).
+#define MOTOR_PAN_DIR          -1
 #define MOTOR_TILT_DIR         -1
 // 절대좌표 직변환: (4096/360) × 60° / 320px ≈ 2.134 step/px
 // 4:3 화면(240px VFOV≈45°) 기준 수직도 동일: (4096/360) × 45° / 240px ≈ 2.134
@@ -607,8 +607,9 @@ static int   g_ai_lock_frames    = 0;
 //  rang_lp: LP 필터 적용된 방위각 (0.1도 단위)
 // ============================================================
 static const float RADAR_STEPS_PER_DECDEG = 4096.0f / 3600.0f;
-// ±2 step(≈0.18도) 이내 미세 진동 무시
-#define RADAR_DEADBAND_STEPS  2
+// ±8 step(≈0.70도) 이내 미세 진동 무시
+// 레이더 노이즈가 LP 후에도 ±3~5 step 잔류 → 2로는 매 프레임 정역 진동 발생 확인
+#define RADAR_DEADBAND_STEPS  8
 
 // 정지 상태에서 첫 포착 시 충격 방지용 가속 램프
 #define RADAR_ACCEL_INIT_STEP  8
@@ -619,8 +620,11 @@ static void motor_update_radar_abs(float rang_lp_val)
 {
     if (!(MOTOR_RD(0x00) & AP_IDLE)) return;
 
-    int target_pan = (int)(rang_lp_val * RADAR_STEPS_PER_DECDEG);
-    int delta      = target_pan - g_motor_abs_pan;
+    // MOTOR_PAN_DIR를 target에 먼저 적용 → g_motor_abs_pan과 동일한 물리 좌표계로 변환
+    // g_motor_abs_pan은 AI bbox 경로에서 DIR 곱해 누적된 물리 좌표계임.
+    // target을 논리 좌표계(DIR 미적용)로 두면 DIR=-1 시 delta가 발산한다.
+    int target_pan_phys = MOTOR_PAN_DIR * (int)(rang_lp_val * RADAR_STEPS_PER_DECDEG);
+    int delta           = target_pan_phys - g_motor_abs_pan;  // 물리 좌표계 일치
 
     if (delta >= -RADAR_DEADBAND_STEPS && delta <= RADAR_DEADBAND_STEPS) {
         g_radar_accel_step = RADAR_ACCEL_INIT_STEP;
@@ -633,7 +637,7 @@ static void motor_update_radar_abs(float rang_lp_val)
     if (delta < -clamp) delta = -clamp;
     g_radar_accel_step += RADAR_ACCEL_INC;
 
-    g_motor_abs_pan += MOTOR_PAN_DIR * delta;
+    g_motor_abs_pan += delta;  // delta는 이미 물리 좌표계 → DIR 재적용 없음
 
     MOTOR_WR(0x10, (u32)g_motor_abs_pan);
     MOTOR_WR(0x18, (u32)g_motor_abs_tilt);
@@ -738,7 +742,7 @@ int main(void)
     uint16_t rdist     = 0;
     int16_t  rang      = 0;
     int      radar_age = RADAR_STALE_FRAMES;
-    // LP 필터 상태: α=0.4로 레이더 좌우 지터 억제 (KD항 미분 증폭 방지)
+    // LP 필터 상태: α=0.2 (5프레임≈167ms 응답). α=0.4에서 노이즈 ±5step 잔류 진동 확인 → 강화
     static float rang_lp = 0.0f;
 
     while(true){
@@ -749,7 +753,7 @@ int main(void)
             radar_age = 0;
             if(rvc>0) {
                 process_radar_target(rtgt[0], &rdist, &rang);
-                rang_lp = 0.4f * (float)rang + 0.6f * rang_lp;
+                rang_lp = 0.2f * (float)rang + 0.8f * rang_lp;
                 rang = (int16_t)rang_lp;
             }
         } else if (radar_age < RADAR_STALE_FRAMES) {

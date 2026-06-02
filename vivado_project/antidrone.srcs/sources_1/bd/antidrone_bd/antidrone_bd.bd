@@ -2148,7 +2148,7 @@
       },
       "uln2003_controller_0": {
         "vlnv": "xilinx.com:hls:uln2003_controller:1.0",
-        "ip_revision": "2114636044",
+        "ip_revision": "2114636254",
         "xci_name": "antidrone_bd_uln2003_controller_0_0",
         "xci_path": "ip\\antidrone_bd_uln2003_controller_0_0\\antidrone_bd_uln2003_controller_0_0.xci",
         "inst_hier_path": "uln2003_controller_0"
