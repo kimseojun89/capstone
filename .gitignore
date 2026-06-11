@@ -52,3 +52,19 @@ Vitis/*_prj/
 **/.cache/
 **/.compile_commands/
 .vscode/
+
+# ── Xilinx 임시 작업 폴더 ───────────────────────────────
+.Xil/
+**/.Xil/
+
+# ── Claude Code 런타임 (락/임시) ────────────────────────
+.claude/scheduled_tasks.lock
+.claude/*.lock
+
+# ── 외부 다운로드 데이터셋 (386MB; 학습 이미지·산출물·영상) ─
+scripts/Drone-Detection-YOLOv8x-main/
+
+# ── 대용량 샘플 영상 (벤치마크 입력; 별도 보관) ─────────
+*.mp4
+*.avi
+*.mov

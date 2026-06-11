@@ -59,6 +59,14 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
+echo [2/2] Build benchmark (추적 정량화 도구)...
+"%CMAKE%" --build "%BUILD_DIR%" --target benchmark --config Release
+
+if %ERRORLEVEL% NEQ 0 (
+    echo Benchmark build failed.
+    exit /b 1
+)
+
 echo.
 echo ============================
 echo  Build complete.

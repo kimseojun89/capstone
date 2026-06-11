@@ -1,0 +1,7 @@
+path: C:/Users/kimse/capstone/scripts/Drone-Detection-YOLOv8x-main/drone_dataset
+train: train/images
+val: valid/images
+
+nc: 1
+names:
+- drone
